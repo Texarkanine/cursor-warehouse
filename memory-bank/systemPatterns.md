@@ -17,3 +17,11 @@ All provenance tables (`sessions`, `messages`, `tool_calls`, `embeddings`, `scor
 ## Watermark-Based Incremental Sync
 
 The `_sync_state` table tracks file mtimes per source category. On each sync run, only files with mtimes newer than the stored watermark are processed. Dedup within a session is handled by delete-and-reinsert.
+
+## Fork-and-Return Hook Architecture
+
+Cursor hooks run synchronously with managed timeouts and kill the process on timeout. Since initial sync takes 10-30+ seconds, hooks use a thin `hook-launcher.py` that forks `sync.py` and `dashboard.py` as fully detached processes (via `subprocess.Popen` with `start_new_session=True` on POSIX, `DETACHED_PROCESS` on Windows) and returns immediately. The forked processes survive Cursor quitting. Child scripts must be invoked via `uv run --script` (not bare Python) to resolve their PEP 723 dependencies.
+
+## Skill Namespace
+
+All plugin skills use the `cw:` prefix (`cw:query`, `cw:recall`, etc.) to prevent collisions in Cursor's flat skill namespace. Directories use hyphens (`skills/cw-query/`), frontmatter `name:` uses colons.
