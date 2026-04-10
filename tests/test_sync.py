@@ -467,3 +467,181 @@ class TestFullSyncFlow:
         assert row[0] is not None
         assert len(row[0]) > 0
         con.close()
+
+
+# ---------------------------------------------------------------------------
+# Tracking DB Integration Tests
+# ---------------------------------------------------------------------------
+
+class TestTrackingDbIntegration:
+    """Tests for sync_tracking_db — model enrichment and scored_commits import."""
+
+    def test_sync_model_from_tracking(self, tmp_path):
+        """sync_tracking_db populates messages.model from ai_code_hashes."""
+        import sync
+
+        session_id = "tracked-session-001"
+        projects_dir = tmp_path / "projects"
+        session_dir = _make_session_dir(projects_dir, "my-workspace", session_id)
+        _copy_fixture("cursor_session.jsonl", session_dir, f"{session_id}.jsonl")
+
+        db_path = tmp_path / "test.duckdb"
+        con = duckdb.connect(str(db_path))
+        con.execute(SCHEMA_PATH.read_text())
+        sync.sync_all(con, projects_dir)
+
+        # Verify model is NULL before tracking DB sync
+        null_models = con.execute(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ? AND model IS NULL",
+            [session_id],
+        ).fetchone()[0]
+        assert null_models > 0
+
+        # Create tracking DB with model info for this session
+        tracking_path = tmp_path / "ai-code-tracking.db"
+        _create_tracking_db(tracking_path, code_hashes=[
+            {"conversationId": session_id, "model": "claude-4.6-opus-high-thinking"},
+        ])
+
+        sync.sync_tracking_db(con, tracking_db_path=tracking_path)
+
+        # Some messages should now have model populated
+        with_model = con.execute(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ? AND model IS NOT NULL",
+            [session_id],
+        ).fetchone()[0]
+        assert with_model > 0
+        con.close()
+
+    def test_multi_model_conversations(self, tmp_path):
+        """Different models on different conversations are tracked correctly."""
+        import sync
+
+        projects_dir = tmp_path / "projects"
+        db_path = tmp_path / "test.duckdb"
+        con = duckdb.connect(str(db_path))
+        con.execute(SCHEMA_PATH.read_text())
+
+        # Create two sessions
+        for sid in ["session-a", "session-b"]:
+            session_dir = _make_session_dir(projects_dir, "my-workspace", sid)
+            _copy_fixture("cursor_session.jsonl", session_dir, f"{sid}.jsonl")
+
+        sync.sync_all(con, projects_dir)
+
+        tracking_path = tmp_path / "ai-code-tracking.db"
+        _create_tracking_db(tracking_path, code_hashes=[
+            {"conversationId": "session-a", "model": "claude-4.6-opus-high-thinking"},
+            {"conversationId": "session-b", "model": "gpt-5.3-codex"},
+        ])
+
+        sync.sync_tracking_db(con, tracking_db_path=tracking_path)
+
+        model_a = con.execute(
+            "SELECT DISTINCT model FROM messages WHERE session_id = 'session-a' AND model IS NOT NULL"
+        ).fetchall()
+        model_b = con.execute(
+            "SELECT DISTINCT model FROM messages WHERE session_id = 'session-b' AND model IS NOT NULL"
+        ).fetchall()
+
+        assert any("claude" in r[0] for r in model_a)
+        assert any("gpt" in r[0] for r in model_b)
+        con.close()
+
+    def test_scored_commits_imported(self, tmp_path):
+        """scored_commits rows are imported with correct column mapping."""
+        import sync
+
+        db_path = tmp_path / "test.duckdb"
+        con = duckdb.connect(str(db_path))
+        con.execute(SCHEMA_PATH.read_text())
+
+        tracking_path = tmp_path / "ai-code-tracking.db"
+        _create_tracking_db(tracking_path, scored_commits=[
+            {
+                "commitHash": "abc123def",
+                "branchName": "main",
+                "scoredAt": "2026-04-10T12:00:00",
+                "linesAdded": 100,
+                "linesDeleted": 20,
+                "tabLinesAdded": 30,
+                "tabLinesDeleted": 5,
+                "composerLinesAdded": 50,
+                "composerLinesDeleted": 10,
+                "humanLinesAdded": 20,
+                "humanLinesDeleted": 5,
+                "blankLinesAdded": 0,
+                "blankLinesDeleted": 0,
+                "commitMessage": "feat: add auth module",
+                "commitDate": "2026-04-10",
+                "v1AiPercentage": "80%",
+                "v2AiPercentage": "75%",
+            }
+        ])
+
+        sync.sync_tracking_db(con, tracking_db_path=tracking_path)
+
+        row = con.execute(
+            "SELECT commit_hash, branch_name, harness, lines_added, v1_ai_percentage "
+            "FROM scored_commits WHERE commit_hash = 'abc123def'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "abc123def"
+        assert row[1] == "main"
+        assert row[2] == "cursor"
+        assert row[3] == 100
+        assert row[4] == "80%"
+        con.close()
+
+    def test_scored_commits_dedup_on_resync(self, tmp_path):
+        """Re-syncing tracking DB doesn't create duplicate scored_commits rows."""
+        import sync
+
+        db_path = tmp_path / "test.duckdb"
+        con = duckdb.connect(str(db_path))
+        con.execute(SCHEMA_PATH.read_text())
+
+        tracking_path = tmp_path / "ai-code-tracking.db"
+        _create_tracking_db(tracking_path, scored_commits=[
+            {"commitHash": "dedup-hash", "branchName": "main"},
+        ])
+
+        sync.sync_tracking_db(con, tracking_db_path=tracking_path)
+        count1 = con.execute("SELECT COUNT(*) FROM scored_commits").fetchone()[0]
+
+        sync.sync_tracking_db(con, tracking_db_path=tracking_path)
+        count2 = con.execute("SELECT COUNT(*) FROM scored_commits").fetchone()[0]
+
+        assert count1 == count2
+        con.close()
+
+    def test_missing_tracking_db_graceful_skip(self, tmp_path):
+        """Sync completes gracefully when tracking DB does not exist."""
+        import sync
+
+        db_path = tmp_path / "test.duckdb"
+        con = duckdb.connect(str(db_path))
+        con.execute(SCHEMA_PATH.read_text())
+
+        nonexistent = tmp_path / "nonexistent.db"
+        sync.sync_tracking_db(con, tracking_db_path=nonexistent, verbose=True)
+
+        count = con.execute("SELECT COUNT(*) FROM scored_commits").fetchone()[0]
+        assert count == 0
+        con.close()
+
+    def test_locked_tracking_db_graceful_skip(self, tmp_path):
+        """Locked tracking DB is handled gracefully (no crash)."""
+        import sync
+
+        db_path = tmp_path / "test.duckdb"
+        con = duckdb.connect(str(db_path))
+        con.execute(SCHEMA_PATH.read_text())
+
+        # Create an empty file that's not a valid SQLite database
+        bad_db = tmp_path / "bad-tracking.db"
+        bad_db.write_text("not a database")
+
+        # Should not crash
+        sync.sync_tracking_db(con, tracking_db_path=bad_db, verbose=True)
+        con.close()

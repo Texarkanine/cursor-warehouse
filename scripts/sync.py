@@ -370,9 +370,9 @@ def _sync_model_from_tracking(con: duckdb.DuckDBPyConnection, tracking_con, verb
             "SELECT DISTINCT conversationId, model FROM ai_code_hashes "
             "WHERE conversationId IS NOT NULL AND model IS NOT NULL"
         ).fetchall()
-    except sqlite3.OperationalError:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
         if verbose:
-            print("  ai_code_hashes table not found in tracking DB")
+            print("  ai_code_hashes table not found or tracking DB corrupt")
         return
 
     if not rows:
@@ -402,9 +402,9 @@ def _sync_scored_commits(con: duckdb.DuckDBPyConnection, tracking_con, verbose: 
             "commitMessage, commitDate, v1AiPercentage, v2AiPercentage "
             "FROM scored_commits"
         ).fetchall()
-    except sqlite3.OperationalError:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
         if verbose:
-            print("  scored_commits table not found in tracking DB")
+            print("  scored_commits table not found or tracking DB corrupt")
         return
 
     if not rows:
