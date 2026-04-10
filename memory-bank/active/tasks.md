@@ -1,486 +1,256 @@
-# Task: cursor-warehouse VISIONA Port
+# Task: cursor-warehouse PR #1 Rework
 
-* Task ID: visiona-port
+* Task ID: visiona-pr-rework
 * Complexity: Level 3
-* Type: feature (direct fork/port)
+* Type: fix (rework from PR review feedback)
 
-Port [claude-warehouse](https://github.com/sderosiaux/claude-warehouse) (MIT) to read Cursor agent transcript data instead of Claude Code data. Copy upstream source, modify JSONL parser, adapt scripts, add `harness` column, and package as a Cursor plugin.
+Address valid findings from CodeRabbit and LlamaPReview automated reviews on [PR #1](https://github.com/Texarkanine/cursor-warehouse/pull/1). Feedback has been triaged into "valid and worth reworking" vs "not valid / not worth reworking" with justifications.
 
-## Pinned Info
+## PR Feedback Triage
 
-### Data Flow
+### VALID AND WORTH REWORKING
 
-Architecture overview — how Cursor transcript data flows through the system.
+#### R1. hooks/hooks.json: Remove `&` backgrounding from hook commands
+**Source:** CodeRabbit (Major) + LlamaPReview (P1)
+**Justification:** Cursor hooks run synchronously with managed timeouts. The `&` detaches the process immediately, breaking timeout enforcement, error handling, and enabling duplicate process spawning. `sync.py` completes quickly (<5s) and should run synchronously. `dashboard.py` has `serve_forever()` (blocks forever) so it can't run synchronously — it must be spawned from sync.py after sync completes (if not already running), not from the hook directly.
 
-```mermaid
-graph LR
-    classDef source fill:#e1f5fe,stroke:#01579b;
-    classDef script fill:#f3e5f5,stroke:#7b1fa2;
-    classDef store fill:#fff3e0,stroke:#ef6c00;
-    classDef ui fill:#e8f5e9,stroke:#2e7d32;
+#### R2. scripts/sync.py: ON CONFLICT for scored_commits only updates 3 of 15 mutable fields
+**Source:** CodeRabbit (Nitpick)
+**Justification:** The upsert only updates `scored_at`, `lines_added`, `lines_deleted` on conflict. The other 12 fields (`tab_lines_added`, `tab_lines_deleted`, `composer_lines_added`, `composer_lines_deleted`, `human_lines_added`, `human_lines_deleted`, `blank_lines_added`, `blank_lines_deleted`, `commit_message`, `commit_date`, `v1_ai_percentage`, `v2_ai_percentage`) are silently dropped on re-sync. This means corrected historical data in the tracking DB won't propagate. Clear bug.
 
-    T["~/.cursor/projects/*/agent-transcripts/**/*.jsonl"]:::source
-    ACT["~/.cursor/ai-tracking/ai-code-tracking.db"]:::source
-    S["sync.py"]:::script
-    DB["cursor-warehouse.duckdb"]:::store
-    E["embed.py"]:::script
-    Q["query.py"]:::script
-    D["dashboard.py"]:::script
-    V["vsearch.py"]:::script
-    H["static/index.html"]:::ui
+#### R3. static/index.html: XSS via innerHTML injection
+**Source:** CodeRabbit (Critical)
+**Justification:** `project_name`, `model`, `prompt`, and `dev_type` are data-derived fields injected unsanitized into `innerHTML`. While the attack surface is minimal (localhost dashboard, local data), this is a correctness issue and trivial to fix with an `esc()` helper. Good hygiene for a published plugin.
 
-    T -->|"parse JSONL"| S
-    ACT -->|"model, timestamps, scored_commits"| S
-    S -->|"sessions, messages, tool_calls, scored_commits"| DB
-    DB --> Q
-    DB --> D
-    DB --> E
-    E -->|"embeddings table"| DB
-    DB --> V
-    D -->|"serves"| H
-```
+#### R4. scripts/embed.py: Double-prefixed source_id breaks vsearch enrichment
+**Source:** CodeRabbit (Major)
+**Justification:** Verified against code. `embed.py` builds source_id as `f"{sid}:{uuid}"` where `uuid` is already `session_id:line_idx` (from sync.py line 133). Result: `session_id:session_id:line_idx`. In vsearch.py `enrich()`, `source_id.split(":", 1)` extracts `sid` correctly, but then queries `m.uuid = source_id` (the full double-prefixed string), which won't match `messages.uuid` (which is `session_id:line_idx`). This breaks all vsearch enrichment metadata (project, date show as empty). Real bug.
 
-### Modified Schema (ER)
+#### R5. scripts/vsearch.py: Parameterized INTERVAL invalid DuckDB SQL
+**Source:** CodeRabbit (Major)
+**Justification:** Line 91: `INTERVAL ? DAY` — DuckDB requires interval literals, not parameters. This will throw a runtime error when `--days` is used. Fix: `current_date - (? * INTERVAL '1 day')`.
 
-Cursor-warehouse retains 4 of the upstream's 9 data tables plus the watermark table. All provenance tables gain a `harness` column. Additionally, `scored_commits` is a new Cursor-specific table sourced from `ai-code-tracking.db`.
+#### R6. static/index.html: Handle non-2xx fetch responses
+**Source:** CodeRabbit (Nitpick)
+**Justification:** `fetchJSON()` calls `r.json()` without checking `r.ok`. HTTP 500 errors from the dashboard API surface as opaque JSON parse errors instead of useful error messages. Trivial defensive fix.
 
-```mermaid
-erDiagram
-    _sync_state {
-        VARCHAR source_name PK
-        DOUBLE last_mtime
-        TIMESTAMP last_run
-        INTEGER files_synced
-        BIGINT rows_synced
-    }
-    sessions {
-        VARCHAR session_id PK
-        TEXT harness "NOT NULL DEFAULT cursor"
-        VARCHAR project_path
-        VARCHAR project_name
-        TIMESTAMP created_at
-        TIMESTAMP modified_at
-        INTEGER message_count
-        JSON tools_used
-        JSON models_used
-        VARCHAR first_prompt
-        VARCHAR file_path
-        BOOLEAN is_subagent
-        VARCHAR parent_session_id
-    }
-    messages {
-        VARCHAR session_id PK
-        VARCHAR uuid PK
-        TEXT harness "NOT NULL DEFAULT cursor"
-        VARCHAR type
-        TIMESTAMP timestamp
-        VARCHAR role
-        VARCHAR model
-        JSON content_types
-        VARCHAR tool_name
-        VARCHAR text_content
-    }
-    tool_calls {
-        VARCHAR session_id PK
-        VARCHAR message_uuid PK
-        INTEGER idx PK
-        TEXT harness "NOT NULL DEFAULT cursor"
-        VARCHAR tool_name
-        VARCHAR tool_input
-        TIMESTAMP timestamp
-    }
-    embeddings {
-        VARCHAR source_type PK
-        VARCHAR source_id PK
-        INTEGER chunk_idx PK
-        TEXT harness "NOT NULL DEFAULT cursor"
-        VARCHAR text_preview
-        FLOAT_384 embedding
-    }
-    scored_commits {
-        VARCHAR commit_hash PK
-        VARCHAR branch_name PK
-        TEXT harness "NOT NULL DEFAULT cursor"
-        TIMESTAMP scored_at
-        INTEGER lines_added
-        INTEGER lines_deleted
-        INTEGER tab_lines_added
-        INTEGER tab_lines_deleted
-        INTEGER composer_lines_added
-        INTEGER composer_lines_deleted
-        INTEGER human_lines_added
-        INTEGER human_lines_deleted
-        INTEGER blank_lines_added
-        INTEGER blank_lines_deleted
-        VARCHAR commit_message
-        TIMESTAMP commit_date
-        VARCHAR v1_ai_percentage
-        VARCHAR v2_ai_percentage
-    }
+#### R7. scripts/sync.py: Silent exception swallowing in _ingest_jsonl
+**Source:** CodeRabbit (Nitpick) + LlamaPReview (P2)
+**Justification:** Line 185: `except Exception: return None` silently swallows ALL errors including permission denied, I/O errors, encoding errors. A `print(... file=sys.stderr)` warning is trivial and dramatically improves debuggability for an ETL pipeline.
 
-    sessions ||--o{ messages : "session_id"
-    sessions ||--o{ tool_calls : "session_id"
-    messages ||--o{ tool_calls : "uuid = message_uuid"
-```
+#### R8. scripts/sync.py: Include exception type in tracking DB failure message
+**Source:** CodeRabbit (Nitpick)
+**Justification:** Line 524: `except Exception as e:` should include `type(e).__name__` in the verbose message. The broad catch is intentional (maximum resilience), but logging the exception type costs nothing and helps diagnosis.
 
-### Cursor Data Sources
+#### R9. dashboard.py + query.py: MAX(model) is non-deterministic for multi-model sessions
+**Source:** CodeRabbit (Major) + LlamaPReview (P2)
+**Justification:** `MAX(model)` picks the lexicographically largest model string, which is arbitrary and misleading for sessions that used multiple models. `STRING_AGG(DISTINCT model, ', ' ORDER BY model)` would be deterministic, accurate, and equally simple.
 
-Cursor stores agent data across two sources (verified by on-disk analysis of 218 JSONL files and the tracking SQLite database):
+#### R10. skills/report/SKILL.md: Off-by-one bucket label
+**Source:** CodeRabbit (Minor)
+**Justification:** CASE expression: `message_count <= 30 → 'medium (11-30 msgs)'`, ELSE `'long (30+ msgs)'`. A 30-message session is medium, so ELSE is actually 31+. Label should be `'long (31+ msgs)'`. Genuine off-by-one.
 
-**Primary: `agent-transcripts/` JSONL** — all current GUI agent sessions (parent + subagent)
-- Path: `~/.cursor/projects/{workspace-slug}/agent-transcripts/{session-uuid}/{session-uuid}.jsonl`
-- 165 parent sessions + 53 subagent sessions observed
-- Sparse format: only `role` + `message.content[]` (text + tool_use blocks)
+#### R11. skills/{report,wrapped,query}/SKILL.md: Missing language tags on code fences
+**Source:** CodeRabbit (Minor)
+**Justification:** Three SKILL.md files have bare ``` fences for schema reference blocks. Adding `text` language tag satisfies markdownlint MD040 and is trivial.
 
-**Supplementary: `ai-code-tracking.db`** — per-code-change metadata with model info
-- Path: `~/.cursor/ai-tracking/ai-code-tracking.db` (SQLite)
-- `ai_code_hashes` table: 39K+ rows, `conversationId` links 100% to agent-transcript session UUIDs
-- `scored_commits` table: 322 rows, commit-level AI attribution (tab/composer/human/blank line breakdown)
-- Models observed: `claude-4.6-opus-high-thinking`, `composer-2-fast`, `default`, `claude-4.6-sonnet-medium-thinking`, `gpt-5.3-codex`, `grok-4-20-thinking`, `gpt-5.4-medium`
+#### R12. tests/test_sync.py: Unused variable prefixes
+**Source:** CodeRabbit (Nitpick)
+**Justification:** Three occurrences of unpacked-but-unused variables (`sid`, `subagents`). Prefixing with `_` signals intent. Trivial.
 
-**Dead: `chats/` SQLite blob stores** — old format (Jan–Feb 2026 only, 86 sessions, no longer written to). Not targeted.
+### NOT VALID AND/OR NOT WORTH REWORKING
 
-### Cursor JSONL Format vs Claude Code
+#### N1. scripts/schema.sql: Include harness in composite primary keys
+**Source:** CodeRabbit (Nitpick)
+**Justification:** This is a single-harness system. The `harness` column exists as a forward-compatibility marker (documented in systemPatterns.md). Adding it to PKs would require cascading changes throughout ALL queries, ON CONFLICT clauses, and JOIN conditions for zero practical benefit — there is no second harness. Multi-harness support is explicitly VISIONB/C scope. The "collision" scenario requires a second harness emitting overlapping session UUIDs, which is astronomically unlikely even if multi-harness were implemented (UUIDs don't collide).
 
-Key differences that drive the sync.py rewrite:
+#### N2. static/index.html: Bucket color mapping "never matches"
+**Source:** CodeRabbit (Minor)
+**Justification:** **False positive.** CodeRabbit confused the report SKILL.md SQL (which uses descriptive labels like `'abandoned (1-3 msgs)'`) with the dashboard API SQL. The actual `dashboard.py` `api_efficiency()` returns bare labels: `'abandoned'`, `'short'`, `'medium'`, `'long'` — which perfectly match the `bucketColors` keys. No fix needed.
 
-| Aspect | Claude Code | Cursor JSONL | Cursor + tracking DB |
-|--------|-------------|--------------|----------------------|
-| Top-level type field | `type` ("user", "assistant") | `role` ("user", "assistant") | — |
-| Message UUID | `uuid` per record | **None** — generate as `{session_id}:{line_number}` | — |
-| Timestamps | `timestamp` per message | **None** — use file mtime for session timestamps | Per-code-change ms timestamps via `ai_code_hashes.timestamp` |
-| Token usage | `message.usage.*` | **None** — leave as 0/NULL | **None** (confirmed absent everywhere) |
-| Session ID source | `sessionId` field in records | Directory name (UUID from path) | `ai_code_hashes.conversationId` = session UUID |
-| Discovery path | `~/.claude/projects/**/*.jsonl` | `~/.cursor/projects/*/agent-transcripts/**/*.jsonl` | `~/.cursor/ai-tracking/ai-code-tracking.db` |
-| Content blocks | `message.content[]` | `message.content[]` (identical) | — |
-| Subagent detection | `/subagents/` in path | `/subagents/` in path (identical) | — |
-| Sidechain | `isSidechain` field | **None** | — |
-| Model | `message.model` | **None** in JSONL | Per-request via `ai_code_hashes` join (for turns producing code changes; NULL for read-only turns) |
-| AI attribution per commit | N/A | N/A | **NEW**: `scored_commits` — tab/composer/human lines + AI % |
+#### N3. scripts/vsearch.py: ANN LIMIT before filtering drops valid matches
+**Source:** CodeRabbit (Major)
+**Justification:** The 3x oversampling (`LIMIT limit * 3`) before post-filtering by project/days is a standard pattern for ANN search with post-filters. Adding project/days filters inside the SQL would require expensive JOINs that prevent HNSW index usage. Iterative paging adds significant complexity for marginal benefit in a local analytics tool. Acceptable tradeoff for v0.1.
+
+#### N4. scripts/dashboard.py: Unused AI attribution endpoint
+**Source:** LlamaPReview (P2)
+**Justification:** Intentional. The `api_ai_attribution` endpoint was built to serve the API for skills and external consumers. The frontend chart is VISIONB scope. The endpoint is not dead code — it's a completed API surface that the frontend will consume later. Skills already reference `scored_commits` data.
+
+#### N5. scripts/query.py: Inefficient model subquery performance
+**Source:** LlamaPReview (P2)
+**Justification:** Premature optimization. The dataset is local (typically <500 sessions). DuckDB handles this subquery efficiently via hash aggregation. Materializing model info into the sessions table during sync adds sync complexity and creates a second source of truth. Not worth the coupling for a local analytics tool.
+
+#### N6. scripts/sync.py: Per-conversation model UPDATE round-trips
+**Source:** LlamaPReview (P2)
+**Justification:** The model enrichment loop (~150-200 iterations for a typical user) completes in <100ms on DuckDB. A batch UPDATE via temp table would be cleaner but adds code complexity for negligible performance gain. Not blocking for v0.1.
+
+#### N7. scripts/dashboard.py: CORS wildcard Access-Control-Allow-Origin: *
+**Source:** CodeRabbit (inline)
+**Justification:** This is a localhost-only dashboard (`127.0.0.1:3141`) serving local data. Restricting CORS adds complexity with zero security benefit — any process on localhost can already read the DuckDB file directly. The wildcard enables useful integrations (e.g., a Cursor webview panel fetching from the dashboard API).
+
+#### N8. memory-bank/: Various doc cleanup (reflection stale text, hooks naming, VISIONA language tags)
+**Source:** CodeRabbit (various)
+**Justification:** Memory-bank files are development process documents, not shipped code. The reflection accurately captured the state at writing time. The hooks naming "conflict" is already explained in context (hooks.json is the source, .cursor/hooks.json is the install target). VISIONA.md language tags are cosmetic. None affect functionality or user experience.
 
 ## Component Analysis
 
 ### Affected Components
 
-- **`scripts/schema.sql`**: DuckDB DDL → drop 5 Claude-specific tables (`deleted_sessions`, `hook_events`, `todos`, `debug_logs`, `research_history`), add `harness` column to 4 tables, add new `scored_commits` table
-- **`scripts/sync.py`**: JSONL ETL pipeline → **main rewrite**: change discovery path, rewrite JSONL parser for Cursor format, remove 6 Claude-specific sync functions, add harness support. **New**: `sync_tracking_db()` reads `ai-code-tracking.db` to populate `messages.model` via `ai_code_hashes` join and import `scored_commits`
-- **`scripts/query.py`**: CLI query interface → update DB_PATH, rename prog, remove `hooks` command, remove research_history from search, adapt tokens/size for no-token-data
-- **`scripts/dashboard.py`**: HTTP dashboard server → update DB_PATH, remove/repurpose cost endpoints, remap tool names in trends/wrapped, update type_map for Cursor tools
-- **`scripts/embed.py`**: Vector embedding generator → update DB_PATH, remove research embedding pipeline, adapt stale cleanup (no research_history)
-- **`scripts/vsearch.py`**: Semantic vector search → update DB_PATH, remove research source type
-- **`static/index.html`**: Dashboard frontend → rebrand to cursor-warehouse, remove/adapt cost UI sections
-- **`.cursor-plugin/plugin.json`**: Plugin manifest (NEW, replaces `.claude-plugin/`)
-- **`.cursor/hooks.json`**: Session hooks (NEW, Cursor uses `.cursor/hooks.json` not `hooks/hooks.json`)
-- **`skills/`**: Agent skills → port 4 skills (query, recall, report, wrapped), remove costs skill, update all references
-- **`README.md`**: Project documentation → rewrite for cursor-warehouse, credit upstream
-- **`.gitignore`**: Copy from upstream as-is
-- **`LICENSE`**: MIT license file (NEW)
+- **`hooks/hooks.json`**: Hook configuration → remove `&` from sync, restructure dashboard startup
+- **`scripts/sync.py`**: ETL pipeline → fix scored_commits upsert, add error logging, improve exception messages, spawn dashboard after sync
+- **`scripts/embed.py`**: Embedding pipeline → fix double-prefixed source_id
+- **`scripts/vsearch.py`**: Vector search → fix INTERVAL SQL syntax
+- **`scripts/dashboard.py`**: HTTP dashboard → fix MAX(model) to deterministic summary
+- **`scripts/query.py`**: CLI query → fix MAX(model) to deterministic summary
+- **`static/index.html`**: Dashboard frontend → add XSS escaping, handle non-2xx responses
+- **`skills/report/SKILL.md`**: Skill doc → fix off-by-one label, add language tag
+- **`skills/wrapped/SKILL.md`**: Skill doc → add language tag
+- **`skills/query/SKILL.md`**: Skill doc → add language tag
+- **`tests/test_sync.py`**: Tests → prefix unused variables
 
 ### Cross-Module Dependencies
 
-- `sync.py` → `schema.sql`: executes DDL to init DB
-- `sync.py` → `ai-code-tracking.db`: reads model info + scored commits (SQLite, read-only)
-- `query.py`, `dashboard.py`, `embed.py`, `vsearch.py` → DB tables defined in `schema.sql`
-- `embed.py` → `schema.sql`: also inits DB + manages HNSW index
-- `dashboard.py` → `static/index.html`: serves static files
-- `query.py` → `vsearch.py`: delegates `vsearch` subcommand
-- Skills → scripts: skills reference script paths via `${CURSOR_PLUGIN_ROOT}/scripts/`
+- `embed.py` source_id fix (R4) must match `vsearch.py` enrichment logic
+- `embed.py` source_id fix (R4) must match `count_unembedded()` and `clean_stale_embeddings()` queries
+- Dashboard startup change (R1) requires `sync.py` to spawn `dashboard.py`
 
 ### Boundary Changes
 
-- **Schema**: 5 tables dropped, `harness` column added to 4 tables, `scored_commits` table added
-- **Sessions table**: drops `git_branch`, `version`, `cwd`, token columns (set to 0/NULL since Cursor doesn't provide them)
-- **Messages table**: drops `parent_uuid`, `is_sidechain` (set to NULL/FALSE), token columns. `model` column now populated via `ai-code-tracking.db` join (for code-producing turns)
-- **New `scored_commits` table**: Cursor-specific — commit-level AI attribution (tab/composer/human line counts + AI percentages)
-- **Sync data sources**: Two inputs — JSONL transcripts (primary) + `ai-code-tracking.db` (supplementary, model + commits)
-- **CLI**: `hooks` command removed, prog renamed from `cw` to `cursor-warehouse`
-- **Dashboard API**: `/api/costs` repurposed as session-count-by-project (no token cost data)
+- `embed.py` embeddings.source_id format changes from `session_id:session_id:line_idx` to `session_id:line_idx` — existing embeddings will become stale and be cleaned up on next `embed.py --full` run
+- Hook commands change — users with existing plugin installs will get new behavior on update
 
 ### Invariants & Constraints
 
-1. MIT license preserved on all ported files
-2. PEP 723 script pattern preserved (`uv run --script`)
-3. DuckDB as warehouse engine (unchanged)
-4. sentence-transformers + torch for embeddings (unchanged)
-5. Chart.js dashboard (unchanged)
-6. HTTP server on port 3141 (unchanged)
-7. HNSW index for vector similarity (unchanged)
-8. `harness` column defaults to `'cursor'` on all provenance tables
-9. No pyproject.toml / uv.lock (VISION2 scope)
+1. All existing 53 tests must continue passing
+2. No new dependencies
+3. Backward compatibility: existing embeddings cleaned gracefully (not crash)
+4. Hook changes must not break non-plugin installs
 
 ## Open Questions
 
-None — implementation approach is clear. VISIONA provides detailed specifications for every component. Data format analysis complete:
-- Cursor JSONL format verified against 218 files / 7,620 records
-- `ai-code-tracking.db` schema verified against live database (39K+ rows)
-- `chats/` format investigated and confirmed dead (Jan–Feb 2026 only, not targeted)
-- Model availability confirmed via `ai_code_hashes` join (7 distinct models observed)
+None — all rework items have clear implementations.
 
 ## Test Plan (TDD)
 
 ### Behaviors to Verify
 
-**Schema (`test_schema.py`):**
-- Schema DDL executes without error on fresh DuckDB
-- Tables `_sync_state`, `sessions`, `messages`, `tool_calls`, `embeddings`, `scored_commits` exist
-- Tables `deleted_sessions`, `hook_events`, `todos`, `debug_logs`, `research_history` do NOT exist
-- `harness` column exists with default `'cursor'` on `sessions`, `messages`, `tool_calls`, `embeddings`, `scored_commits`
-- `scored_commits` has correct columns: `commit_hash`, `branch_name`, `harness`, `scored_at`, line counts (tab/composer/human/blank added/deleted), `commit_message`, `commit_date`, `v1_ai_percentage`, `v2_ai_percentage`
+**R2 (scored_commits upsert):**
+- Re-syncing scored_commits with changed tab/human/AI% values → all fields update
+- Existing test `test_scored_commits_dedup` may need enhancement
 
-**Sync — JSONL Parser (`test_sync.py`):**
-- Cursor JSONL with `role` field (not `type`) is parsed correctly
-- Message UUIDs generated as `{session_id}:{line_number}` are stable and deterministic
-- Session ID derived from directory name (UUID from path)
-- `message.content[]` text blocks extracted correctly
-- `message.content[]` tool_use blocks extracted into tool_calls table
-- Token counts default to 0 (not available in Cursor)
-- `harness` column set to `'cursor'` on all inserted rows
-- Subagent detection via `/subagents/` path works
-- Parent session ID derived from subagent path structure
-- Empty JSONL files handled gracefully (no crash, no rows)
-- Malformed JSON lines skipped without crash
-- First user prompt extracted correctly for session summary
+**R4 (embed source_id):**
+- Message embedding source_id matches vsearch enrichment lookup
+- Stale embeddings with old double-prefixed IDs are cleaned on next run
 
-**Sync — Discovery (`test_sync.py`):**
-- `_scan_jsonl_files()` finds files under `agent-transcripts/` structure
-- Watermark system filters out already-processed files
-- Multiple workspace slugs are discovered
+**R5 (vsearch INTERVAL):**
+- `--days` filter works without SQL error
 
-**Sync — Tracking DB Integration (`test_sync.py`):**
-- `sync_tracking_db()` reads `ai-code-tracking.db` and populates `messages.model` via `ai_code_hashes.conversationId` + `requestId` join
-- Model populated on messages whose request produced code changes; NULL for read-only turns
-- Multi-model conversations: different models on different turns within same session
-- `scored_commits` rows imported with correct column mapping (camelCase → snake_case)
-- Dedup: re-syncing tracking DB doesn't create duplicate `scored_commits` rows
-- Missing tracking DB: sync completes gracefully (logs warning, model stays NULL, no scored_commits)
-- Tracking DB path discovery: finds `~/.cursor/ai-tracking/ai-code-tracking.db`
-
-**Sync — Removed Functions:**
-- No `sync_deleted_sessions`, `sync_hook_events`, `sync_todos`, `sync_debug`, `sync_history`, `purge_synced_files` functions exist
-
-**Edge cases:**
-- JSONL file with only assistant messages (no user turn) → still creates session
-- JSONL with 0 bytes → skip gracefully
-- Session with content blocks that are plain strings (not dicts)
-- Very long text_content → truncated to 2000 chars
-- Tracking DB locked by active Cursor process → graceful skip with warning
+**R7 (ingest error logging):**
+- Malformed file produces stderr warning (not silent skip)
 
 ### Test Infrastructure
 
 - Framework: pytest
 - Run command: `uv run --with pytest --with duckdb pytest tests/ -v`
 - Test location: `tests/`
-- Fixtures: `tests/fixtures/` with sample Cursor JSONL files and a sample `ai-code-tracking.db`
-- New test files:
-  - `tests/conftest.py` — adds `scripts/` to `sys.path`, provides DuckDB fixtures, provides sample tracking DB fixture
-  - `tests/test_schema.py` — schema validation (includes `scored_commits` table)
-  - `tests/test_sync.py` — JSONL parser, tracking DB sync, and full sync flow
+- Modified test files: `tests/test_sync.py` (existing tests + R2 enhancement)
+- No new test files needed — most fixes are in UI/query layer not covered by unit tests
 
 ### Integration Tests
 
-- **Full sync flow**: Create temp directory mimicking `~/.cursor/projects/` structure with sample JSONL files + sample `ai-code-tracking.db`, run sync, verify all tables populated correctly including `messages.model` and `scored_commits`
-- **Dedup**: Sync same file twice, verify no duplicate rows (JSONL and scored_commits)
-- **Tracking DB missing**: Full sync completes successfully when `ai-code-tracking.db` does not exist (model stays NULL, scored_commits empty)
+- Existing full sync integration tests cover R2 (scored_commits)
+- R4 requires manual verification (embed.py + vsearch.py interaction)
+- R5 requires manual verification (vsearch.py with --days flag)
 
 ## Implementation Plan
 
-### Phase 1: Foundation (schema + test infra)
+### Phase 1: Bug fixes (scripts)
 
-1. **Copy `.gitignore` from upstream**
-    - Files: `.gitignore`
-    - Changes: copy as-is from upstream
-
-2. **Create `scripts/schema.sql`**
-    - Files: `scripts/schema.sql`
-    - Changes: Copy upstream, drop 5 Claude-specific table definitions (`deleted_sessions`, `hook_events`, `todos`, `debug_logs`, `research_history`), add `harness TEXT NOT NULL DEFAULT 'cursor'` to `sessions`, `messages`, `tool_calls`, `embeddings`. Add new `scored_commits` table with `commit_hash`/`branch_name` PK, `harness`, line counts (tab/composer/human/blank), `commit_message`, `commit_date`, AI percentages.
-
-3. **Create test infrastructure + `tests/test_schema.py`**
-    - Files: `tests/conftest.py`, `tests/test_schema.py`, `tests/fixtures/` (empty for now)
-    - Changes: conftest.py sets up sys.path and DuckDB fixtures; test_schema.py validates table existence (including `scored_commits`), harness column defaults, absence of dropped tables, `scored_commits` column structure
-
-4. **Run schema tests** — should pass immediately since schema.sql is just DDL
-
-### Phase 2: Sync Engine (main rewrite — TDD)
-
-5. **Create test fixtures**
-    - Files: `tests/fixtures/cursor_session.jsonl`, `tests/fixtures/cursor_subagent.jsonl`, `tests/fixtures/empty.jsonl`, `tests/fixtures/malformed.jsonl`
-    - Changes: Hand-craft sample Cursor-format JSONL files based on verified format
-
-6. **Write + stub `tests/test_sync.py`**
-    - Files: `tests/test_sync.py`
-    - Changes: Full test implementations covering all behaviors listed in test plan
-
-7. **Copy and stub `scripts/sync.py`**
+1. **Fix scored_commits upsert to update ALL mutable fields (R2)**
     - Files: `scripts/sync.py`
-    - Changes: Copy upstream, change paths/constants, stub out Cursor-specific parser (empty body), remove Claude-specific functions
+    - Changes: Expand ON CONFLICT DO UPDATE SET to include all 12 additional mutable columns
+    - TDD: Enhance `test_scored_commits_dedup` to verify all fields update on re-sync
 
-8. **Run tests** — all sync tests should fail (TDD red phase)
-
-9. **Implement `scripts/sync.py` Cursor JSONL parser**
-    - Files: `scripts/sync.py`
-    - Changes:
-      - `CURSOR_DIR = Path.home() / ".cursor"`, `DB_PATH = CURSOR_DIR / "cursor-warehouse.duckdb"`
-      - Discovery: `~/.cursor/projects/*/agent-transcripts/**/*.jsonl`
-      - `_ingest_jsonl()`: parse `role` (not `type`), generate UUID as `{session_id}:{line_idx}`, skip `uuid`/`timestamp`/`sessionId` record fields, default tokens to 0, set `harness='cursor'`
-      - `_scan_jsonl_files()`: scan `agent-transcripts/` directories
-      - `sync_sessions()` / `sync_subagents()`: adapt for Cursor path structure
-      - `main()`: remove calls to deleted sync functions, remove `--purge` flag
-      - Session metadata: `project_name` derived from workspace slug, `project_path` from transcript directory
-
-10. **Run tests iteratively** until all pass (TDD green phase)
-
-### Phase 2b: Tracking DB Integration (TDD)
-
-11. **Create tracking DB test fixture**
-    - Files: `tests/fixtures/sample_tracking.db`
-    - Changes: Create a minimal SQLite database matching `ai-code-tracking.db` schema with `ai_code_hashes` rows (multiple models, multiple requestIds per conversationId) and `scored_commits` rows
-
-12. **Write tracking DB tests in `tests/test_sync.py`**
-    - Files: `tests/test_sync.py`
-    - Changes: Add test cases for:
-      - `sync_tracking_db()` populates `messages.model` via join
-      - Multi-model conversations get correct per-request model
-      - `scored_commits` imported with snake_case column mapping
-      - Dedup on re-sync
-      - Missing tracking DB → graceful skip
-      - Locked tracking DB → graceful skip with warning
-
-13. **Run tests** — tracking DB tests should fail (TDD red phase)
-
-14. **Implement `sync_tracking_db()` in `scripts/sync.py`**
-    - Files: `scripts/sync.py`
-    - Changes:
-      - `_find_tracking_db()`: discover `ai-code-tracking.db` path (check `~/.cursor/ai-tracking/` on both WSL and Windows-mapped paths)
-      - `_sync_model_from_tracking()`: open tracking DB read-only, join `ai_code_hashes` on `conversationId = session_id`, group by `(conversationId, requestId)` to get model per request, UPDATE `messages.model` for matching messages (correlate by timestamp range within the session)
-      - `_sync_scored_commits()`: read `scored_commits` table, INSERT OR REPLACE into DuckDB `scored_commits` with snake_case column names and `harness='cursor'`
-      - `main()`: call `sync_tracking_db()` after JSONL sync, wrapped in try/except for graceful failure
-
-15. **Run tests iteratively** until all pass (TDD green phase)
-
-### Phase 3: Query Layer
-
-16. **Copy and modify `scripts/query.py`**
-    - Files: `scripts/query.py`
-    - Changes:
-      - `DB_PATH = Path.home() / ".cursor" / "cursor-warehouse.duckdb"`
-      - `prog="cursor-warehouse"` in argparse
-      - Remove `cmd_hooks` function and `hooks` subcommand
-      - `cmd_tokens`: gracefully handle 0 token counts, show "N/A" or 0
-      - `cmd_search`: remove `research_history` query
-      - `cmd_size`: remove `hook_events`, `todos`, `debug_logs`, `research_history` from table list; add `scored_commits`
-      - `cmd_vsearch`: update plugin path discovery for cursor-warehouse
-      - Docstring: `cursor-warehouse` references
-
-17. **Copy and modify `scripts/dashboard.py`**
-    - Files: `scripts/dashboard.py`
-    - Changes:
-      - `DB_PATH = Path.home() / ".cursor" / "cursor-warehouse.duckdb"`
-      - `api_overview()`: remove cost calculation, show session/message counts; add model distribution summary
-      - `api_costs()`: repurpose as session-count-by-project (no token cost data)
-      - `api_trends()`: remap tool names — writes: `Write`, `StrReplace`, `EditNotebook`; reads: `Read`, `Glob`, `Grep`, `SemanticSearch`
-      - `api_efficiency()`: remove `avg_cost_usd` from prompt quality
-      - `api_wrapped()`: update `type_map` for Cursor tools (`Write`→"The Architect", `Read`→"The Scholar", `Shell`→"The Hacker", `StrReplace`→"The Surgeon", `Grep`→"The Detective", `Glob`→"The Explorer", `Task`→"The Orchestrator", `SemanticSearch`→"The Researcher")
-      - New: `api_ai_attribution()`: serve `scored_commits` data for AI % visualization
-      - Docstring: `cursor-warehouse` references
-
-18. **Copy and modify `static/index.html`**
-    - Files: `static/index.html`
-    - Changes:
-      - Title: `cursor-warehouse`
-      - Header: `cursor-warehouse` branding
-      - Remove "Est. Cost" overview card
-      - Cost chart section → "Sessions by Project" (bar chart of session counts)
-      - Remove `fmtUsd` references where token cost data is unavailable
-      - Prompt quality chart: remove cost axis, show avg messages instead
-      - New: AI Attribution section — chart showing `scored_commits` AI % over time
-
-### Phase 4: Embeddings
-
-19. **Copy and modify `scripts/embed.py`**
+2. **Fix embed.py double-prefixed source_id (R4)**
     - Files: `scripts/embed.py`
-    - Changes:
-      - `DB_PATH = Path.home() / ".cursor" / "cursor-warehouse.duckdb"`
-      - Remove `embed_research()` function and `res_count` from `count_unembedded()`
-      - Remove stale research cleanup from `clean_stale_embeddings()`
-      - `main()`: remove research embedding call
-      - Docstring: `cursor-warehouse` references
+    - Changes: In `embed_messages()` and `count_unembedded()` and `clean_stale_embeddings()`, change source_id from `f"{sid}:{uuid}"` to just `uuid` (since uuid already contains session_id prefix). Update all `m.session_id || ':' || m.uuid` SQL concatenations to just `m.uuid`.
 
-20. **Copy and modify `scripts/vsearch.py`**
+3. **Fix vsearch.py parameterized INTERVAL (R5)**
     - Files: `scripts/vsearch.py`
+    - Changes: Line 91: change `INTERVAL ? DAY` to `? * INTERVAL '1 day'`
+
+4. **Fix MAX(model) to deterministic summary (R9)**
+    - Files: `scripts/dashboard.py`, `scripts/query.py`
+    - Changes: Replace `MAX(model)` with `STRING_AGG(DISTINCT model, ', ' ORDER BY model)` in both files' model subqueries
+
+5. **Add error logging to _ingest_jsonl (R7)**
+    - Files: `scripts/sync.py`
+    - Changes: Line 185: `except Exception as e: print(f"[sync] Skipping {fp}: {type(e).__name__}: {e}", file=sys.stderr); return None`
+
+6. **Include exception type in tracking DB failure message (R8)**
+    - Files: `scripts/sync.py`
+    - Changes: Line 526: add `type(e).__name__` to the verbose message
+
+### Phase 2: Frontend fixes
+
+7. **Add XSS escaping to innerHTML injections (R3)**
+    - Files: `static/index.html`
+    - Changes: Add `esc()` function that escapes `&`, `<`, `>`, `"`, `'`. Apply to: `project_name`, `model`, `prompt` in sessions table; `dev_type`, `top_tool`, `project_name` in wrapped section.
+
+8. **Handle non-2xx fetch responses (R6)**
+    - Files: `static/index.html`
+    - Changes: Add `if (!r.ok)` check in `fetchJSON()` before calling `r.json()`
+
+### Phase 3: Hook architecture fix
+
+9. **Remove `&` from sync.py hook, restructure dashboard startup (R1)**
+    - Files: `hooks/hooks.json`, `scripts/sync.py`
     - Changes:
-      - `DB_PATH = Path.home() / ".cursor" / "cursor-warehouse.duckdb"`
-      - Remove `"research"` from `--type` choices
-      - Remove research case from `enrich()` function
-      - Docstring: `cursor-warehouse` references
+      - `hooks/hooks.json`: Remove both hook entries. Replace with single sync.py hook (no `&`, timeout 30000ms)
+      - `scripts/sync.py`: After sync completes in `main()`, spawn `dashboard.py` in background via `subprocess.Popen` if port 3141 is not in use (import socket, check port, Popen with stdout/stderr redirected to /dev/null)
 
-### Phase 5: Packaging, Skills, Documentation
+### Phase 4: Documentation & lint cleanup
 
-21. **Create `.cursor-plugin/plugin.json`**
-    - Files: `.cursor-plugin/plugin.json`
-    - Changes: New file with cursor-warehouse metadata, version 0.1.0, MIT license
+10. **Fix off-by-one bucket label (R10)**
+    - Files: `skills/report/SKILL.md`
+    - Changes: `'long (30+ msgs)'` → `'long (31+ msgs)'`
 
-22. **Create `hooks/hooks.json`**
-    - Files: `hooks/hooks.json`
-    - Changes: Cursor-format hooks file (version 1, `sessionStart` event — camelCase per Cursor convention) with sync + dashboard commands using `${CURSOR_PLUGIN_ROOT}` paths. README will document manual `.cursor/hooks.json` setup for non-plugin installs.
+11. **Add language tags to code fences (R11)**
+    - Files: `skills/report/SKILL.md`, `skills/wrapped/SKILL.md`, `skills/query/SKILL.md`
+    - Changes: Add `text` to bare ``` fences for schema reference blocks
 
-23. **Port skills**
-    - Files:
-      - `skills/query/SKILL.md` — update schema refs (remove dropped tables, add scored_commits), update paths, rename references
-      - `skills/recall/SKILL.md` — update paths, rename references
-      - `skills/report/SKILL.md` — remove cost queries, adapt for no token data, update tool names, add model distribution + AI attribution queries
-      - `skills/wrapped/SKILL.md` — remap tool-to-personality for Cursor tools, remove cost queries
-    - Removed: `skills/costs/SKILL.md` — not ported (no token data from Cursor)
+12. **Prefix unused test variables (R12)**
+    - Files: `tests/test_sync.py`
+    - Changes: `sid` → `_sid` (lines 119, 203), `subagents` → `_subagents` (line 314)
 
-24. **Create `LICENSE`**
-    - Files: `LICENSE`
-    - Changes: MIT license text
+### Phase 5: Verification
 
-25. **Write `README.md`**
-    - Files: `README.md`
-    - Changes: cursor-warehouse overview, installation, usage, data sources (JSONL + tracking DB), credits to upstream claude-warehouse
-
-### Phase 6: Global Verification
-
-26. **Global search-and-replace verification**
-    - Verify no remaining references to: `claude-warehouse`, `claude_warehouse`, `~/.claude` (as data path), `CLAUDE_DIR`, `CLAUDE_PLUGIN_ROOT`, `claude.duckdb`, `cw` (as CLI prog name)
-
-27. **Full test suite run**
+13. **Run full test suite**
     - `uv run --with pytest --with duckdb pytest tests/ -v`
+    - All 53+ tests must pass
 
-28. **Manual smoke test**
-    - Run `uv run --script scripts/sync.py -v` against local Cursor transcripts
-    - Run `uv run --script scripts/query.py sessions` — verify `model` column populated
-    - Run `uv run --script scripts/query.py size` — verify `scored_commits` table has rows
-    - Verify dashboard serves at localhost:3141
+14. **Manual smoke tests**
+    - `uv run --script scripts/sync.py -v` — verify error logging on any malformed files
+    - Verify vsearch.py with `--days` flag doesn't crash (R5)
 
 ## Technology Validation
 
-No new technology — all dependencies are inherited from upstream:
-- `duckdb>=1.2` — DuckDB for warehousing
-- `sentence-transformers>=3.0` + `torch` — for embed.py and vsearch.py
-- `pytest` — for test runner (run via `uv run --with`)
-
-Validation: The upstream already validates these dependencies work with PEP 723. We inherit that validation.
+No new technology — all fixes use existing dependencies and patterns.
 
 ## Challenges & Mitigations
 
-- **JSONL parser correctness**: The main risk. Cursor's format lacks UUIDs and timestamps, requiring synthetic generation. Mitigation: comprehensive TDD tests with real fixture data based on verified Cursor transcript format.
-- **No per-message timestamps in JSONL**: Cursor JSONL has no timestamps per message, only file mtime. However, `ai-code-tracking.db` provides ms-precision timestamps for code-producing turns. Mitigation: use file mtime for session-level timestamps, enrich with tracking DB timestamps where available, document limitation for non-code turns.
-- **Model info is partial**: Only available for turns that produce code changes (via `ai-code-tracking.db`). Read-only turns (search, discussion) will have NULL model. Mitigation: populate where available, leave NULL otherwise; still far better than all-NULL. Multi-model conversations are tracked per-request.
-- **No token data**: Cost calculations, token usage charts, and prompt-quality cost correlations are meaningless. Mitigation: remove/repurpose cost UI, show "N/A" where appropriate, repurpose cost-by-project as sessions-by-project.
-- **Tracking DB cross-platform path**: `ai-code-tracking.db` lives at `~/.cursor/ai-tracking/` which on WSL maps to the Windows user profile. Path discovery must handle both native Linux and WSL-to-Windows paths. Mitigation: check multiple candidate paths; log which one was found.
-- **Tracking DB locking**: Active Cursor process may lock the SQLite database. Mitigation: open with `?immutable=1` URI flag or copy to temp location; gracefully skip if inaccessible.
-- **Cursor plugin/hooks format uncertainty**: Cursor's plugin manifest format (`.cursor-plugin/plugin.json`) may differ from Claude's. Mitigation: follow VISIONA's spec; Cursor's hooks system is confirmed to exist (`.cursor/hooks.json` with `sessionStart` event).
-- **Workspace slug decoding**: Deriving human-readable project names from workspace slugs (e.g., `home-mobaxterm-Documents-git-myproject` → `myproject`) requires heuristic parsing. Mitigation: take last segment after splitting on hyphens that correspond to path separators; good enough for display, not critical.
+- **R4 (embed source_id) breaks existing embeddings**: Existing embeddings in the DB have double-prefixed source_ids. `clean_stale_embeddings()` will detect them as stale (no matching message) and clean them on next `embed.py` run. New embeddings will use correct single-prefix IDs. No migration needed — the stale cleanup mechanism handles it. Document in commit message.
+- **R1 (dashboard spawn from sync)**: The subprocess.Popen in sync.py must be fire-and-forget (no wait). Must handle case where sync.py is run manually without dashboard.py available. Use try/except around the Popen.
+- **R9 (STRING_AGG model)**: Changing from `MAX(model)` to `STRING_AGG(DISTINCT model, ', ')` may produce longer strings for multi-model sessions. The dashboard and CLI already truncate model display, so this is safe.
 
 ## Status
 
+- [x] PR feedback triage complete (12 valid, 8 rejected)
 - [x] Component analysis complete
-- [x] Open questions resolved
+- [x] Open questions resolved (none)
 - [x] Test planning complete (TDD)
-- [x] Implementation plan complete (revised: +5 steps for tracking DB integration, 28 total)
-- [x] Technology validation complete
-- [x] Preflight (PASS — hooks location corrected)
-- [x] Plan revision: `ai-code-tracking.db` integration (model, scored_commits)
-- [x] Build (28/28 steps complete, 43 tests passing, smoke test verified)
-- [x] QA (PASS — 5 trivial fixes applied, 0 blocking issues)
+- [x] Implementation plan complete (14 steps across 5 phases)
+- [x] Technology validation complete (no new tech)
+- [ ] Preflight
+- [ ] Build
+- [ ] QA
