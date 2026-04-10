@@ -88,7 +88,7 @@ def search(con: duckdb.DuckDBPyConnection, query_embedding: list[float],
             continue
         if days and meta.get("created_at"):
             age_check = con.execute(
-                "SELECT ? >= current_date - INTERVAL ? DAY",
+                "SELECT ? >= current_date - (? * INTERVAL '1 day')",
                 [meta["created_at"], days],
             ).fetchone()
             if age_check and not age_check[0]:

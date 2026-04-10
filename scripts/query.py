@@ -68,7 +68,7 @@ def cmd_sessions(con: duckdb.DuckDBPyConnection, args):
             s.session_id
         FROM sessions s
         LEFT JOIN (
-            SELECT session_id, MAX(model) as model
+            SELECT session_id, STRING_AGG(DISTINCT model, ', ' ORDER BY model) as model
             FROM messages WHERE model IS NOT NULL
             GROUP BY session_id
         ) model_info ON s.session_id = model_info.session_id

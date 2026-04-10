@@ -192,9 +192,11 @@ None — all rework items have clear implementations.
 **R4 (embed source_id):**
 - Message embedding source_id matches vsearch enrichment lookup
 - Stale embeddings with old double-prefixed IDs are cleaned on next run
+- Unit test: `embed_messages` produces source_ids matching `messages.uuid` format (no double-prefix)
 
 **R5 (vsearch INTERVAL):**
 - `--days` filter works without SQL error
+- Unit test: `--days` filter SQL executes without error against DuckDB
 
 **R7 (ingest error logging):**
 - Malformed file produces stderr warning (not silent skip)
@@ -208,14 +210,17 @@ None — all rework items have clear implementations.
 - Framework: pytest
 - Run command: `uv run --with pytest --with duckdb pytest tests/ -v`
 - Test location: `tests/`
-- Modified test files: `tests/test_sync.py` (existing tests + R2 enhancement)
+- Modified test files: `tests/test_sync.py` (existing tests + R2 enhancement + R4 embed source_id test + R5 INTERVAL test)
 - No new test files needed — hook launcher and skills are integration-tested via smoke test
+
+### New Unit Tests
+
+- R4: Verify `embed_messages` source_id format matches `messages.uuid` (no double session_id prefix)
+- R5: Verify `--days` INTERVAL SQL executes without error against a real DuckDB connection
 
 ### Integration Tests
 
 - Existing full sync integration tests cover R2 (scored_commits)
-- R4 requires manual verification (embed.py + vsearch.py interaction)
-- R5 requires manual verification (vsearch.py with --days flag)
 - R1 requires manual verification (hook-launcher.py spawns processes correctly)
 
 ## Implementation Plan
@@ -228,12 +233,15 @@ None — all rework items have clear implementations.
     - TDD: Enhance `test_scored_commits_dedup` to verify all fields update on re-sync
 
 2. **Fix embed.py double-prefixed source_id (R4)**
-    - Files: `scripts/embed.py`
+    - Files: `scripts/embed.py`, `scripts/sync.py`
     - Changes: In `embed_messages()` and `count_unembedded()` and `clean_stale_embeddings()`, change source_id from `f"{sid}:{uuid}"` to just `uuid` (since uuid already contains session_id prefix). Update all `m.session_id || ':' || m.uuid` SQL concatenations to just `m.uuid`.
+    - Also: Add format-contract comment on `msg_uuid = f"{session_id}:{line_idx}"` in `sync.py` (line 133) documenting that this format is consumed by `embed.py` source_id and `vsearch.py` enrichment.
+    - TDD: Add unit test verifying `embed_messages` produces source_ids that match the `messages.uuid` column format (no double-prefix)
 
 3. **Fix vsearch.py parameterized INTERVAL (R5)**
     - Files: `scripts/vsearch.py`
     - Changes: Line 91: change `INTERVAL ? DAY` to `? * INTERVAL '1 day'`
+    - TDD: Add unit test verifying `--days` filter SQL executes without error against a DuckDB connection
 
 4. **Fix MAX(model) to deterministic summary (R9)**
     - Files: `scripts/dashboard.py`, `scripts/query.py`
@@ -348,6 +356,6 @@ No new external technology. `hook-launcher.py` uses only Python stdlib (`subproc
 - [x] Test planning complete (TDD)
 - [x] Implementation plan complete (16 steps across 6 phases)
 - [x] Technology validation complete (stdlib only)
-- [ ] Preflight
-- [ ] Build
+- [x] Preflight
+- [x] Build
 - [ ] QA

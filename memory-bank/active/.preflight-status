@@ -1,8 +1,4 @@
 PASS
-timestamp: 2026-04-10
-task-id: visiona-port
-findings:
-  - "minor: hooks file location corrected to hooks/hooks.json (plugin bundle) with README docs for manual .cursor/hooks.json setup"
-  - "info: no automated tests for query/dashboard/embed/vsearch — search-and-replace risk is low, manual smoke test is proportionate"
-advisory:
-  - "consider --watch flag for sync.py polling interval (trivial to implement, not in VISIONA spec)"
+task: visiona-pr-rework
+date: 2026-04-10
+findings: 0 blocking, 2 advisory

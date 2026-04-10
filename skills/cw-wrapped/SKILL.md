@@ -1,5 +1,5 @@
 ---
-name: wrapped
+name: "cw:wrapped"
 description: Generate a fun, shareable summary of your Cursor agent usage stats — like Spotify Wrapped but for AI-assisted development. Use when the user asks for their stats, summary, wrapped, or wants a fun overview of their Cursor activity.
 ---
 
@@ -13,7 +13,7 @@ Run ALL queries below, then present as an engaging, shareable summary.
 
 When the user specifies a date range, add WHERE clauses. Use these join paths:
 
-```
+```text
 sessions.session_id  ←→  messages.session_id
 sessions.session_id  ←→  tool_calls.session_id
 messages.uuid        ←→  tool_calls.message_uuid   (NOT message_id)

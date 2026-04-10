@@ -112,14 +112,15 @@ To uninstall the local override, remove the entries from both JSON files, delete
 
 | Skill | Description |
 |-------|-------------|
-| `query` | Raw SQL against the warehouse |
-| `recall` | Cross-session memory search |
-| `report` | Analytics report on development habits |
-| `wrapped` | Fun stats summary (Spotify Wrapped style) |
+| `cw:initialize` | First-time setup — run after install to populate the warehouse |
+| `cw:query` | Raw SQL against the warehouse |
+| `cw:recall` | Cross-session memory search |
+| `cw:report` | Analytics report on development habits |
+| `cw:wrapped` | Fun stats summary (Spotify Wrapped style) |
 
 ## Hooks
 
-The plugin runs `sync.py` and starts the dashboard automatically on session start. For manual hook setup without the plugin, copy `hooks/hooks.json` to `.cursor/hooks.json` in your workspace.
+The plugin launches a thin `hook-launcher.py` on session start that forks `sync.py` and `dashboard.py` as fully detached processes (they survive Cursor quitting). For manual hook setup without the plugin, copy `hooks/hooks.json` to `.cursor/hooks.json` in your workspace.
 
 ## Running tests
 

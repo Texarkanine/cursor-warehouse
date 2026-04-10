@@ -116,7 +116,7 @@ class TestIngestJsonl:
         fp = FIXTURES_DIR / "cursor_session.jsonl"
         result = sync._ingest_jsonl(db, fp, session_id="test-session-001")
         assert result is not None
-        sid, msg_count = result
+        _sid, msg_count = result
         assert msg_count == 6  # 3 user + 3 assistant messages
 
     def test_message_uuids_are_deterministic(self, db):
@@ -200,7 +200,7 @@ class TestIngestJsonl:
         fp = FIXTURES_DIR / "malformed.jsonl"
         result = sync._ingest_jsonl(db, fp, session_id="malformed-session")
         assert result is not None
-        sid, msg_count = result
+        _sid, msg_count = result
         assert msg_count == 3  # 3 valid lines, 2 malformed skipped
 
     def test_subagent_flag_set(self, db):
@@ -274,6 +274,17 @@ class TestIngestJsonl:
         assert "Read" in tools
         assert "Write" in tools
 
+    def test_ingest_error_logs_to_stderr(self, db, tmp_path, capsys):
+        """File errors during ingest produce a stderr warning instead of silent skip."""
+        import sync
+
+        nonexistent = tmp_path / "no_such_file.jsonl"
+        result = sync._ingest_jsonl(db, nonexistent, session_id="error-session")
+
+        assert result is None
+        captured = capsys.readouterr()
+        assert "no_such_file" in captured.err
+
 
 # ---------------------------------------------------------------------------
 # Discovery Tests
@@ -312,7 +323,7 @@ class TestDiscovery:
         fp = _copy_fixture("cursor_session.jsonl", session_dir, "session-ccc.jsonl")
 
         future_wm = time.time() + 9999
-        sessions, subagents = sync._scan_jsonl_files(projects_dir, future_wm, future_wm)
+        sessions, _subagents = sync._scan_jsonl_files(projects_dir, future_wm, future_wm)
         assert len(sessions) == 0
 
     def test_multiple_workspaces_discovered(self, tmp_path):
@@ -644,6 +655,184 @@ class TestTrackingDbIntegration:
         # Should not crash
         sync.sync_tracking_db(con, tracking_db_path=bad_db, verbose=True)
         con.close()
+
+    def test_scored_commits_upsert_updates_all_mutable_fields(self, tmp_path):
+        """Re-syncing scored_commits with changed values updates ALL mutable fields, not just 3."""
+        import sync
+
+        db_path = tmp_path / "test.duckdb"
+        con = duckdb.connect(str(db_path))
+        con.execute(SCHEMA_PATH.read_text())
+
+        tracking_path = tmp_path / "ai-code-tracking.db"
+        _create_tracking_db(tracking_path, scored_commits=[{
+            "commitHash": "upsert-hash", "branchName": "main",
+            "scoredAt": "2026-04-10T12:00:00",
+            "linesAdded": 100, "linesDeleted": 20,
+            "tabLinesAdded": 30, "tabLinesDeleted": 5,
+            "composerLinesAdded": 50, "composerLinesDeleted": 10,
+            "humanLinesAdded": 20, "humanLinesDeleted": 5,
+            "blankLinesAdded": 0, "blankLinesDeleted": 0,
+            "commitMessage": "initial commit", "commitDate": "2026-04-10",
+            "v1AiPercentage": "80%", "v2AiPercentage": "75%",
+        }])
+        sync.sync_tracking_db(con, tracking_db_path=tracking_path)
+
+        # Re-create tracking DB with updated values for ALL mutable fields
+        tracking_path.unlink()
+        _create_tracking_db(tracking_path, scored_commits=[{
+            "commitHash": "upsert-hash", "branchName": "main",
+            "scoredAt": "2026-04-11T12:00:00",
+            "linesAdded": 200, "linesDeleted": 40,
+            "tabLinesAdded": 60, "tabLinesDeleted": 10,
+            "composerLinesAdded": 100, "composerLinesDeleted": 20,
+            "humanLinesAdded": 40, "humanLinesDeleted": 10,
+            "blankLinesAdded": 5, "blankLinesDeleted": 3,
+            "commitMessage": "updated commit", "commitDate": "2026-04-11",
+            "v1AiPercentage": "90%", "v2AiPercentage": "85%",
+        }])
+        sync.sync_tracking_db(con, tracking_db_path=tracking_path)
+
+        row = con.execute("""
+            SELECT lines_added, lines_deleted, tab_lines_added, tab_lines_deleted,
+                   composer_lines_added, composer_lines_deleted, human_lines_added,
+                   human_lines_deleted, blank_lines_added, blank_lines_deleted,
+                   commit_message, v1_ai_percentage, v2_ai_percentage
+            FROM scored_commits WHERE commit_hash = 'upsert-hash'
+        """).fetchone()
+
+        assert row[0] == 200   # lines_added
+        assert row[1] == 40    # lines_deleted
+        assert row[2] == 60    # tab_lines_added
+        assert row[3] == 10    # tab_lines_deleted
+        assert row[4] == 100   # composer_lines_added
+        assert row[5] == 20    # composer_lines_deleted
+        assert row[6] == 40    # human_lines_added
+        assert row[7] == 10    # human_lines_deleted
+        assert row[8] == 5     # blank_lines_added
+        assert row[9] == 3     # blank_lines_deleted
+        assert row[10] == "updated commit"  # commit_message
+        assert row[11] == "90%"  # v1_ai_percentage
+        assert row[12] == "85%"  # v2_ai_percentage
+        con.close()
+
+
+# ---------------------------------------------------------------------------
+# Embed Source ID Contract Tests
+# ---------------------------------------------------------------------------
+
+class TestEmbedSourceIdContract:
+    """Contract tests between sync.py uuid format and embed.py source_id format.
+
+    embed.py should use messages.uuid directly as the embedding source_id.
+    Since uuid is already '{session_id}:{line_idx}', no additional prefixing is needed.
+    """
+
+    def test_embed_source_id_matches_message_uuid(self, db):
+        """Embedding source_id = messages.uuid; the count_unembedded query should match."""
+        import sync
+
+        fp = FIXTURES_DIR / "cursor_session.jsonl"
+        sync._ingest_jsonl(db, fp, session_id="embed-test-session")
+
+        row = db.execute(
+            "SELECT uuid FROM messages WHERE session_id = 'embed-test-session' LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        msg_uuid = row[0]
+        assert msg_uuid.startswith("embed-test-session:")
+
+        # count_unembedded query pattern (post-fix: source_id = m.uuid)
+        unembedded = db.execute("""
+            SELECT COUNT(*) FROM messages m
+            LEFT JOIN embeddings e ON e.source_type = 'message'
+                AND e.source_id = m.uuid
+            WHERE e.source_id IS NULL
+                AND m.text_content IS NOT NULL AND LENGTH(m.text_content) >= 30
+        """).fetchone()[0]
+        assert unembedded > 0
+
+        # Insert embedding with source_id = uuid (correct format)
+        db.execute(
+            "INSERT INTO embeddings VALUES ('message', ?, 0, 'cursor', 'test', NULL)",
+            [msg_uuid],
+        )
+
+        # That specific message should no longer count as unembedded
+        still_unembedded = db.execute("""
+            SELECT COUNT(*) FROM messages m
+            LEFT JOIN embeddings e ON e.source_type = 'message'
+                AND e.source_id = m.uuid
+            WHERE e.source_id IS NULL
+                AND m.session_id = 'embed-test-session' AND m.uuid = ?
+                AND m.text_content IS NOT NULL AND LENGTH(m.text_content) >= 30
+        """, [msg_uuid]).fetchone()[0]
+        assert still_unembedded == 0
+
+    def test_stale_detection_with_correct_source_id(self, db):
+        """clean_stale_embeddings query correctly identifies orphans when source_id = uuid."""
+        import sync
+
+        fp = FIXTURES_DIR / "cursor_session.jsonl"
+        sync._ingest_jsonl(db, fp, session_id="stale-test-session")
+
+        row = db.execute(
+            "SELECT uuid FROM messages WHERE session_id = 'stale-test-session' LIMIT 1"
+        ).fetchone()
+        msg_uuid = row[0]
+
+        # Embedding with valid source_id should NOT be stale
+        db.execute(
+            "INSERT INTO embeddings VALUES ('message', ?, 0, 'cursor', 'test', NULL)",
+            [msg_uuid],
+        )
+        stale = db.execute("""
+            SELECT e.source_id FROM embeddings e
+            WHERE e.source_type = 'message'
+            AND NOT EXISTS (SELECT 1 FROM messages m WHERE e.source_id = m.uuid)
+        """).fetchall()
+        assert len(stale) == 0
+
+        # Orphaned embedding SHOULD be detected as stale
+        db.execute(
+            "INSERT INTO embeddings VALUES ('message', 'nonexistent:99', 0, 'cursor', 'test', NULL)",
+        )
+        stale = db.execute("""
+            SELECT e.source_id FROM embeddings e
+            WHERE e.source_type = 'message'
+            AND NOT EXISTS (SELECT 1 FROM messages m WHERE e.source_id = m.uuid)
+        """).fetchall()
+        assert len(stale) == 1
+        assert stale[0][0] == "nonexistent:99"
+
+
+# ---------------------------------------------------------------------------
+# DuckDB INTERVAL SQL Syntax Tests
+# ---------------------------------------------------------------------------
+
+class TestIntervalSqlSyntax:
+    """Verify parameterized INTERVAL expression works in DuckDB (R5 vsearch fix)."""
+
+    def test_parameterized_interval_executes(self, db):
+        """The expression '? * INTERVAL 1 day' must work as a parameterized day offset."""
+        result = db.execute(
+            "SELECT current_date - (? * INTERVAL '1 day')",
+            [7],
+        ).fetchone()
+        assert result is not None
+
+    def test_date_comparison_with_parameterized_interval(self, db):
+        """Date filtering with parameterized interval returns correct rows."""
+        db.execute("CREATE TEMP TABLE test_dates (d DATE)")
+        db.execute("INSERT INTO test_dates VALUES (current_date - INTERVAL '3 days')")
+        db.execute("INSERT INTO test_dates VALUES (current_date - INTERVAL '10 days')")
+
+        result = db.execute(
+            "SELECT d >= current_date - (? * INTERVAL '1 day') FROM test_dates ORDER BY d",
+            [7],
+        ).fetchall()
+        assert result[0][0] is False   # 10 days ago NOT within 7 days
+        assert result[1][0] is True    # 3 days ago IS within 7 days
 
 
 # ---------------------------------------------------------------------------

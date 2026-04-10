@@ -8,6 +8,7 @@
 import argparse
 import json
 import sqlite3
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -130,6 +131,8 @@ def _ingest_jsonl(con: duckdb.DuckDBPyConnection, fp: Path, session_id: str,
                 except json.JSONDecodeError:
                     continue
 
+                # Format contract: embed.py source_id and vsearch.py enrichment
+                # both rely on uuid being '{session_id}:{line_idx}'.
                 msg_uuid = f"{session_id}:{line_idx}"
                 msg_payload = rec.get("message", {})
                 if not isinstance(msg_payload, dict):
@@ -182,7 +185,8 @@ def _ingest_jsonl(con: duckdb.DuckDBPyConnection, fp: Path, session_id: str,
                     tool_name,
                     truncate(text_content, 2000),
                 ))
-    except Exception:
+    except Exception as e:
+        print(f"[sync] Skipping {fp}: {type(e).__name__}: {e}", file=sys.stderr)
         return None
 
     if not messages:
@@ -476,7 +480,19 @@ def _sync_scored_commits(con: duckdb.DuckDBPyConnection, tracking_con, verbose: 
             ON CONFLICT (commit_hash, branch_name) DO UPDATE SET
                 scored_at = excluded.scored_at,
                 lines_added = excluded.lines_added,
-                lines_deleted = excluded.lines_deleted
+                lines_deleted = excluded.lines_deleted,
+                tab_lines_added = excluded.tab_lines_added,
+                tab_lines_deleted = excluded.tab_lines_deleted,
+                composer_lines_added = excluded.composer_lines_added,
+                composer_lines_deleted = excluded.composer_lines_deleted,
+                human_lines_added = excluded.human_lines_added,
+                human_lines_deleted = excluded.human_lines_deleted,
+                blank_lines_added = excluded.blank_lines_added,
+                blank_lines_deleted = excluded.blank_lines_deleted,
+                commit_message = excluded.commit_message,
+                commit_date = excluded.commit_date,
+                v1_ai_percentage = excluded.v1_ai_percentage,
+                v2_ai_percentage = excluded.v2_ai_percentage
         """, [
             row[0], row[1], "cursor", scored_at,
             row[3], row[4], row[5], row[6], row[7], row[8],
@@ -523,7 +539,7 @@ def main():
         sync_tracking_db(con, verbose=args.verbose)
     except Exception as e:
         if args.verbose:
-            print(f"  Tracking DB sync failed (non-fatal): {e}")
+            print(f"  Tracking DB sync failed (non-fatal): {type(e).__name__}: {e}")
 
     if args.compact:
         if args.verbose:

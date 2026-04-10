@@ -1,5 +1,5 @@
 ---
-name: recall
+name: "cw:recall"
 description: Search across all past Cursor agent sessions. Use when you need to recall previous work, find solutions to problems you've solved before, or retrieve context from past conversations. Powered by DuckDB keyword search and semantic vector search over session history.
 ---
 
@@ -34,11 +34,11 @@ Finds results even when exact words don't match. Supports filters: `--project X`
 **Keyword** returns exact substring matches — high precision, low recall.
 **Semantic** returns conceptually similar content — lower precision, high recall. Score > 0.7 = strong match, 0.5-0.7 = related.
 
-Combine both to get a complete picture. Use session IDs to dig deeper with `/cursor-warehouse:query`.
+Combine both to get a complete picture. Use session IDs to dig deeper with `cw:query`.
 
 ## Tips
 
 - Search for error messages, library names, patterns, concepts
 - Use short, specific terms for keyword search
 - Use natural language descriptions for semantic search
-- Combine with `/cursor-warehouse:query` for complex lookups (e.g., "all sessions in project X that used tool Y")
+- Combine with `cw:query` for complex lookups (e.g., "all sessions in project X that used tool Y")

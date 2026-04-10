@@ -152,8 +152,14 @@ function delta(cur, prev) {
     return `<span class="card-delta ${cls}">${sign}${pct}% vs prev 30d</span>`;
 }
 
+function esc(s) {
+    if (s == null) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 async function fetchJSON(path) {
     const r = await fetch(API + path);
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${r.statusText}`);
     const data = await r.json();
     if (data.error) throw new Error(data.error);
     return data;
@@ -278,11 +284,11 @@ async function loadSessions() {
     const table = document.getElementById('sessions-table');
     table.innerHTML = `<table><thead><tr><th>Date</th><th>Project</th><th>Msgs</th><th>Model</th><th>Prompt</th></tr></thead><tbody>` +
         data.map(s => `<tr>
-            <td class="mono">${s.started || ''}</td>
-            <td>${(s.project_name || '').slice(0, 24)}</td>
+            <td class="mono">${esc(s.started)}</td>
+            <td>${esc((s.project_name || '').slice(0, 24))}</td>
             <td>${s.msgs}</td>
-            <td class="mono">${(s.model || 'N/A').slice(0, 30)}</td>
-            <td class="prompt-cell">${(s.prompt || '').slice(0, 80)}</td>
+            <td class="mono">${esc((s.model || 'N/A').slice(0, 30))}</td>
+            <td class="prompt-cell">${esc((s.prompt || '').slice(0, 80))}</td>
         </tr>`).join('') + '</tbody></table>';
 }
 
@@ -292,12 +298,12 @@ async function loadWrapped() {
     if (!data.alltime) { w.textContent = 'No data yet.'; return; }
     const a = data.alltime;
     w.innerHTML = `<div class="wrapped-grid">
-        <div class="wrapped-item"><label>Total Sessions</label><div class="val">${fmt(a.total_sessions)}</div><div class="sub">${a.first_session} — ${a.latest_session}</div></div>
+        <div class="wrapped-item"><label>Total Sessions</label><div class="val">${fmt(a.total_sessions)}</div><div class="sub">${esc(a.first_session)} — ${esc(a.latest_session)}</div></div>
         <div class="wrapped-item"><label>Total Messages</label><div class="val">${fmt(a.total_messages)}</div></div>
         <div class="wrapped-item"><label>Projects</label><div class="val">${a.total_projects}</div></div>
-        <div class="wrapped-item"><label>Your Type</label><div class="val">${data.dev_type}</div><div class="sub">Top tool: ${data.top_tool}</div></div>
-        ${data.streak ? `<div class="wrapped-item"><label>Best Streak</label><div class="val">${data.streak.streak_days} days</div><div class="sub">${data.streak.from_date} — ${data.streak.to_date}</div></div>` : ''}
-        ${data.marathon ? `<div class="wrapped-item"><label>Marathon Session</label><div class="val">${data.marathon.msgs} msgs</div><div class="sub">${data.marathon.project_name || ''}</div></div>` : ''}
+        <div class="wrapped-item"><label>Your Type</label><div class="val">${esc(data.dev_type)}</div><div class="sub">Top tool: ${esc(data.top_tool)}</div></div>
+        ${data.streak ? `<div class="wrapped-item"><label>Best Streak</label><div class="val">${data.streak.streak_days} days</div><div class="sub">${esc(data.streak.from_date)} — ${esc(data.streak.to_date)}</div></div>` : ''}
+        ${data.marathon ? `<div class="wrapped-item"><label>Marathon Session</label><div class="val">${data.marathon.msgs} msgs</div><div class="sub">${esc(data.marathon.project_name)}</div></div>` : ''}
         ${data.peak_hours && data.peak_hours.length ? `<div class="wrapped-item"><label>Peak Hour</label><div class="val">${data.peak_hours[0].hour}:00</div><div class="sub">${data.peak_hours[0].sessions} sessions</div></div>` : ''}
     </div>`;
 }

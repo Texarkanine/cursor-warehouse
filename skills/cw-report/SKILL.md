@@ -1,5 +1,5 @@
 ---
-name: report
+name: "cw:report"
 description: Generate an analytics report on your AI-assisted development habits. Use when the user asks about their productivity, workflow patterns, session efficiency, or wants to understand how they use Cursor. Covers model usage, tool patterns, session shapes, project maturity, AI attribution, and actionable improvement suggestions.
 ---
 
@@ -13,7 +13,7 @@ Run ALL of the following queries and synthesize the results into a clear, action
 
 When the user specifies a date range, add WHERE clauses. Use these join paths:
 
-```
+```text
 sessions.session_id  ←→  messages.session_id
 sessions.session_id  ←→  tool_calls.session_id
 messages.uuid        ←→  tool_calls.message_uuid   (NOT message_id)
@@ -46,7 +46,7 @@ ${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT COALESCE(m.model, 'unknown') 
 ## 3. Session efficiency (short vs long, abandoned sessions)
 
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT CASE WHEN message_count <= 3 THEN 'abandoned (1-3 msgs)' WHEN message_count <= 10 THEN 'short (4-10 msgs)' WHEN message_count <= 30 THEN 'medium (11-30 msgs)' ELSE 'long (30+ msgs)' END as bucket, COUNT(*) sessions, ROUND(AVG(message_count), 1) avg_msgs FROM sessions WHERE created_at >= current_date - INTERVAL '30 days' GROUP BY 1 ORDER BY MIN(message_count)"
+${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT CASE WHEN message_count <= 3 THEN 'abandoned (1-3 msgs)' WHEN message_count <= 10 THEN 'short (4-10 msgs)' WHEN message_count <= 30 THEN 'medium (11-30 msgs)' ELSE 'long (31+ msgs)' END as bucket, COUNT(*) sessions, ROUND(AVG(message_count), 1) avg_msgs FROM sessions WHERE created_at >= current_date - INTERVAL '30 days' GROUP BY 1 ORDER BY MIN(message_count)"
 ```
 
 ## 4. Tool usage distribution

@@ -119,7 +119,7 @@ def api_sessions() -> list[dict]:
             LEFT(s.session_id, 8) as id
         FROM sessions s
         LEFT JOIN (
-            SELECT session_id, MAX(model) as model
+            SELECT session_id, STRING_AGG(DISTINCT model, ', ' ORDER BY model) as model
             FROM messages WHERE model IS NOT NULL GROUP BY session_id
         ) mi ON s.session_id = mi.session_id
         ORDER BY s.created_at DESC LIMIT 30

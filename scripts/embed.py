@@ -61,7 +61,7 @@ def count_unembedded(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
     msg_count = con.execute("""
         SELECT COUNT(*) FROM messages m
         LEFT JOIN embeddings e ON e.source_type = 'message'
-            AND e.source_id = m.session_id || ':' || m.uuid
+            AND e.source_id = m.uuid
         WHERE e.source_id IS NULL
             AND m.text_content IS NOT NULL
             AND LENGTH(m.text_content) >= ?
@@ -84,7 +84,7 @@ def embed_messages(con: duckdb.DuckDBPyConnection, model, verbose: bool = False)
         SELECT m.session_id, m.uuid, m.text_content
         FROM messages m
         LEFT JOIN embeddings e ON e.source_type = 'message'
-            AND e.source_id = m.session_id || ':' || m.uuid
+            AND e.source_id = m.uuid
         WHERE e.source_id IS NULL
             AND m.text_content IS NOT NULL
             AND LENGTH(m.text_content) >= ?
@@ -97,10 +97,9 @@ def embed_messages(con: duckdb.DuckDBPyConnection, model, verbose: bool = False)
     embeddings = batch_encode(model, texts)
 
     batch = []
-    for (sid, uuid, text), emb in zip(rows, embeddings):
-        source_id = f"{sid}:{uuid}"
+    for (_sid, uuid, text), emb in zip(rows, embeddings):
         preview = text[:200]
-        batch.append(("message", source_id, 0, "cursor", preview, emb))
+        batch.append(("message", uuid, 0, "cursor", preview, emb))
 
     con.executemany(
         "INSERT INTO embeddings VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING",
@@ -151,8 +150,7 @@ def clean_stale_embeddings(con: duckdb.DuckDBPyConnection, verbose: bool = False
         SELECT e.source_id FROM embeddings e
         WHERE e.source_type = 'message'
         AND NOT EXISTS (
-            SELECT 1 FROM messages m
-            WHERE e.source_id = m.session_id || ':' || m.uuid
+            SELECT 1 FROM messages m WHERE e.source_id = m.uuid
         )
     """).fetchall()
 

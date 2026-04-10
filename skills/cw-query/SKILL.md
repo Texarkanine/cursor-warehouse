@@ -1,5 +1,5 @@
 ---
-name: query
+name: "cw:query"
 description: Run raw SQL queries against the Cursor agent session DuckDB warehouse. Use when you need precise, structured lookups across sessions, messages, tool calls, scored commits, or embeddings that go beyond simple text search.
 ---
 
@@ -42,11 +42,11 @@ ${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "$ARGUMENTS"
 
 **embeddings** — Vector embeddings for semantic search
 - `source_type` ('message'|'session'), `source_id`, `chunk_idx`, `harness`, `text_preview`, `embedding` (FLOAT[384])
-- source_id encoding: `session_id:uuid` for messages, `session_id` for sessions
+- source_id encoding: `uuid` (format `{session_id}:{line_idx}`) for messages, `session_id` for sessions
 
 ## Join paths
 
-```
+```text
 sessions.session_id  ←→  messages.session_id
 sessions.session_id  ←→  tool_calls.session_id
 messages.uuid        ←→  tool_calls.message_uuid   (NOT message_id)
