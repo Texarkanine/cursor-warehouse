@@ -285,6 +285,87 @@ Global search-and-replace across all files:
 
 **L3** — the JSONL parser rewrite is the main work. Everything else is search-and-replace plus dropping Claude-specific features. Multiple components touched but the architecture is inherited, not designed.
 
+## Future: Token Counts via `state.vscdb`
+
+The VISIONA port assumes token counts are unavailable because the JSONL transcripts don't include them. This is only half-true. Cursor stores rich per-message metadata — including token counts — in a separate set of SQLite databases that the JSONL files don't expose.
+
+### Data Source
+
+Cursor's "composer" UI state lives in two SQLite databases using a key-value schema (`cursorDiskKV` table):
+
+| Database | Location | Contains |
+|---|---|---|
+| Global storage | `~/.config/Cursor/User/globalStorage/state.vscdb` | Individual message "bubbles" (content + metadata) |
+| Workspace storage | `~/.config/Cursor/User/workspaceStorage/<workspace_id>/state.vscdb` | Session-level "composerData" (metadata + message ordering) |
+
+These are standard SQLite files despite the `.vscdb` extension.
+
+### Key-Value Layout
+
+```sql
+-- Session metadata (workspace DB)
+SELECT value FROM cursorDiskKV WHERE key = 'composerData:<composerId>';
+-- Returns JSON with: composerId, name, createdAt, lastUpdatedAt, fullConversationHeadersOnly
+
+-- Individual message (global DB)
+SELECT value FROM cursorDiskKV WHERE key = 'bubbleId:<composerId>:<bubbleId>';
+-- Returns JSON with 100+ fields per bubble
+```
+
+### Token-Relevant Fields per Bubble
+
+Each bubble JSON blob contains:
+
+```json
+{
+  "tokenCount": {
+    "inputTokens": 12345,
+    "outputTokens": 6789
+  },
+  "thinkingDurationMs": 4200,
+  "usageUuid": "...",
+  "isRefunded": false
+}
+```
+
+- `tokenCount.inputTokens` / `tokenCount.outputTokens` — the per-message token counts we currently show as 0.
+- `thinkingDurationMs` — how long the model spent in "thinking" mode (useful for extended-thinking model analytics).
+- `isRefunded` — whether the request was refunded (useful for filtering out failed/retried requests).
+
+### Additional Rich Metadata Available
+
+Beyond tokens, each bubble includes fields that could enhance analytics:
+
+| Field | Value for cursor-warehouse |
+|---|---|
+| `thinkingDurationMs` | Model thinking time — enables thinking-time-vs-quality analysis |
+| `isAgentic` | Whether agent mode was used (vs. inline/composer chat) |
+| `unifiedMode` | Numeric mode indicator (correlates with chat mode) |
+| `approximateLintErrors` | Lint errors in context at message time |
+| `gitDiffs` | Git diff state at message time |
+| `attachedCodeChunks` | Code context attached to the message |
+| `toolFormerData` | Richer tool call data (includes `rawArgs` and `result`) |
+| `useWeb` | Whether web search was used |
+
+### Integration Strategy
+
+To get token counts into cursor-warehouse, add `state.vscdb` as a third sync source alongside JSONL transcripts and `ai-code-tracking.db`:
+
+1. **Discover workspace DBs**: Glob `~/.config/Cursor/User/workspaceStorage/*/state.vscdb`
+2. **For each workspace DB**: Read `composerData` entries to get session IDs (= `composerId`) and session names
+3. **Cross-reference**: Match `composerId` values to existing sessions by UUID (the composer ID should match or map to the agent-transcript directory UUID)
+4. **Enrich from global DB**: For matched sessions, read bubble data from the global `state.vscdb` to pull `tokenCount`, `thinkingDurationMs`, and other metadata
+5. **Backfill**: UPDATE existing `messages` rows with token counts; UPDATE `sessions` with aggregated totals and session names
+
+The matching step (3) needs investigation — it's not yet confirmed whether `composerId` values in `state.vscdb` correspond 1:1 with the agent-transcript UUIDs. If they don't match directly, the `usageUuid` or `serverBubbleId` fields on bubbles may provide an alternate join path.
+
+### Caveats
+
+- The `state.vscdb` databases are Cursor's live UI state. They may be write-locked while Cursor is running — use `PRAGMA journal_mode=wal` or open read-only with `?mode=ro`.
+- Bubble data is ephemeral — Cursor may prune old entries. The JSONL transcripts remain the authoritative long-term record; `state.vscdb` is a supplementary enrichment source.
+- The `state.vscdb` schema is undocumented and internal to Cursor. It may change without notice across Cursor versions.
+- This approach was discovered by cross-referencing with [cursor-chronicle](https://github.com/mikhailsal/cursor-chronicle), which reads exclusively from `state.vscdb` but does not use `ai-code-tracking.db` or agent transcripts.
+
 ## Attribution
 
 - MIT license from upstream preserved on all copied files
