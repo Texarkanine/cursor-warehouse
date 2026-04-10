@@ -7,6 +7,7 @@
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -67,6 +68,40 @@ def extract_text_content(content_blocks) -> str | None:
         elif isinstance(block, str):
             texts.append(block)
     return "\n".join(texts) if texts else None
+
+
+_RE_USER_QUERY = re.compile(r"<user_query>\s*([\s\S]*)\s*</user_query>")
+_RE_SLASH_CMD = re.compile(r"(?:^|\n)(/\S+[^\n]*)", re.MULTILINE)
+_RE_ANY_XML_TAG = re.compile(r"<[a-z_]+[ >]")
+
+
+def extract_user_query(raw_text: str | None) -> str | None:
+    """Extract the actual user intent from a Cursor message, stripping system context.
+
+    Cursor wraps user messages in XML system context (<user_query>, <rules>,
+    <manually_attached_skills>, etc.).  This function extracts just the user's
+    words using a priority chain:
+      1. Content inside <user_query>...</user_query> tags
+      2. A /slash-command invocation outside XML tags
+      3. The full text if it contains no XML system context at all
+      4. None if no user intent can be isolated
+    """
+    if not raw_text:
+        return None
+
+    m = _RE_USER_QUERY.search(raw_text)
+    if m:
+        extracted = m.group(1).strip()
+        return extracted or None
+
+    m = _RE_SLASH_CMD.search(raw_text)
+    if m:
+        return m.group(1).strip() or None
+
+    if not _RE_ANY_XML_TAG.search(raw_text):
+        return raw_text.strip() or None
+
+    return None
 
 
 def extract_first_prompt(content) -> str | None:
@@ -173,6 +208,10 @@ def _ingest_jsonl(con: duckdb.DuckDBPyConnection, fp: Path, session_id: str,
 
                 text_content = extract_text_content(content)
 
+                user_query = None
+                if msg_type == "user" and text_content:
+                    user_query = truncate(extract_user_query(text_content), 2000)
+
                 if msg_type == "user" and first_user_prompt is None:
                     first_user_prompt = extract_first_prompt(content)
 
@@ -184,6 +223,7 @@ def _ingest_jsonl(con: duckdb.DuckDBPyConnection, fp: Path, session_id: str,
                     json.dumps(content_types) if content_types else None,
                     tool_name,
                     truncate(text_content, 2000),
+                    user_query,
                 ))
     except Exception as e:
         print(f"[sync] Skipping {fp}: {type(e).__name__}: {e}", file=sys.stderr)
@@ -233,7 +273,7 @@ def _ingest_jsonl(con: duckdb.DuckDBPyConnection, fp: Path, session_id: str,
         deduped = {(m[0], m[1]): m for m in messages}
         con.executemany(
             "INSERT INTO messages (session_id, uuid, type, timestamp, role, model, "
-            "content_types, tool_name, text_content) VALUES (?,?,?,?,?,?,?,?,?)",
+            "content_types, tool_name, text_content, user_query) VALUES (?,?,?,?,?,?,?,?,?,?)",
             list(deduped.values()),
         )
     if tool_calls_batch:

@@ -7,11 +7,23 @@ description: Run raw SQL queries against the Cursor agent session DuckDB warehou
 
 Run arbitrary SQL against the local DuckDB warehouse containing all Cursor agent session data.
 
-## Usage
+## Finding the script
+
+`CURSOR_PLUGIN_ROOT` should be set when invoked through the plugin system, but may be unset during development. Resolve once per session:
 
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "$ARGUMENTS"
+QUERY_SCRIPT="${CURSOR_PLUGIN_ROOT:+$CURSOR_PLUGIN_ROOT/scripts/query.py}"
+if [ -z "$QUERY_SCRIPT" ] || [ ! -f "$QUERY_SCRIPT" ]; then
+  QUERY_SCRIPT="$(find ~/.cursor/plugins -name query.py -path '*/cursor-warehouse/*/query.py' 2>/dev/null | head -1)"
+fi
 ```
+
+Once resolved, run queries with:
+```bash
+uv run --script "$QUERY_SCRIPT" sql "$SQL"
+```
+
+The script also has built-in subcommands: `sessions`, `tools`, `search`, `projects`, `size`, `tokens`, `sql`.
 
 ## Schema
 
@@ -54,6 +66,50 @@ messages.uuid        ←→  tool_calls.message_uuid   (NOT message_id)
 
 **Ambiguous columns**: `tool_name` exists in BOTH messages and tool_calls — always qualify with table alias (e.g., `tc.tool_name`).
 
+## Critical: text_content and first_prompt contain system context
+
+User messages in Cursor are wrapped in XML system context: `<user_query>`, `<manually_attached_skills>`, `<rules>`, `<open_and_recently_viewed_files>`, etc. The `text_content` and `first_prompt` fields store the **full raw message** including all this framing. A naive `substr(text_content, 1, 200)` will almost always return system XML, not the user's actual words.
+
+### Extracting actual user intent
+
+Use `regexp_extract` to pull the `<user_query>` tag content:
+```sql
+regexp_extract(m.text_content, '<user_query>\s*([\s\S]*?)\s*</user_query>', 1)
+```
+
+**Skill-invocation sessions** (e.g. `/cw-wrapped`, `/cw-report`) may not have `<user_query>` tags at all — the user message is just the skill's `<manually_attached_skills>` block plus the invocation command. For these, search for the `/cw-` or `/command` pattern:
+```sql
+regexp_extract(m.text_content, '(/\S+[^\n<]*)', 1)
+```
+
+### Combining both patterns
+
+To get a usable "what was this about?" summary for any session:
+```sql
+SELECT
+  s.session_id,
+  COALESCE(
+    NULLIF(regexp_extract(m.text_content, '<user_query>\s*([\s\S]*?)\s*</user_query>', 1), ''),
+    NULLIF(regexp_extract(m.text_content, '(/\S+[^\n<]*)', 1), ''),
+    LEFT(m.text_content, 200)
+  ) AS user_intent
+FROM sessions s
+JOIN messages m ON s.session_id = m.session_id
+  AND m.role = 'user'
+  AND m.timestamp = (SELECT MIN(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.session_id AND m2.role = 'user')
+ORDER BY s.created_at DESC
+LIMIT 10
+```
+
+### Output truncation
+
+The `query.py sql` subcommand truncates columns to **60 characters** by default. When you need longer content, widen the output by truncating within the SQL itself at a length you control:
+```sql
+LEFT(regexp_extract(m.text_content, '<user_query>\s*([\s\S]*?)\s*</user_query>', 1), 500) AS user_query
+```
+
+This way the 60-char display truncation still applies, but you can SELECT multiple rows and still get meaningful previews. For truly long content, select a single row with no artificial truncation and the display will wrap.
+
 ## Example queries
 
 Model usage last 7 days:
@@ -71,7 +127,33 @@ AI attribution summary:
 SELECT branch_name, COUNT(*) commits, AVG(CAST(REPLACE(v2_ai_percentage, '%', '') AS FLOAT)) avg_ai_pct FROM scored_commits GROUP BY 1 ORDER BY 2 DESC
 ```
 
-Sessions for a project:
+Recent sessions with actual user intent:
 ```sql
-SELECT session_id, created_at, message_count, first_prompt FROM sessions WHERE project_name ILIKE '%myproject%' ORDER BY created_at DESC LIMIT 10
+SELECT
+  s.session_id, s.created_at, s.message_count, s.project_name,
+  COALESCE(
+    NULLIF(regexp_extract(m.text_content, '<user_query>\s*([\s\S]*?)\s*</user_query>', 1), ''),
+    NULLIF(regexp_extract(m.text_content, '(/\S+[^\n<]*)', 1), ''),
+    LEFT(m.text_content, 200)
+  ) AS user_intent
+FROM sessions s
+LEFT JOIN (
+  SELECT session_id, text_content,
+    ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp) AS rn
+  FROM messages WHERE role = 'user'
+) m ON s.session_id = m.session_id AND m.rn = 1
+WHERE s.is_subagent = false
+ORDER BY s.created_at DESC LIMIT 10
+```
+
+Frustration signals (user corrections/pushback):
+```sql
+SELECT s.session_id, s.project_name, COUNT(*) frustration_msgs
+FROM messages m
+JOIN sessions s ON m.session_id = s.session_id
+WHERE m.role = 'user'
+  AND (m.text_content ILIKE '%no dice%' OR m.text_content ILIKE '%not even close%'
+       OR m.text_content ILIKE '%did NOT fix%' OR m.text_content ILIKE '%ARGH%'
+       OR m.text_content ILIKE '%that is wrong%' OR m.text_content ILIKE '%still broken%')
+GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 10
 ```

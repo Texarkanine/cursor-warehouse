@@ -9,6 +9,19 @@ Generate a fun, visual summary of the user's Cursor agent activity. Think Spotif
 
 Run ALL queries below, then present as an engaging, shareable summary.
 
+## Finding the script
+
+`CURSOR_PLUGIN_ROOT` should be set when invoked through the plugin system, but may be unset during development. Resolve once per session:
+
+```bash
+QUERY_SCRIPT="${CURSOR_PLUGIN_ROOT:+$CURSOR_PLUGIN_ROOT/scripts/query.py}"
+if [ -z "$QUERY_SCRIPT" ] || [ ! -f "$QUERY_SCRIPT" ]; then
+  QUERY_SCRIPT="$(find ~/.cursor/plugins -name query.py -path '*/cursor-warehouse/*/query.py' 2>/dev/null | head -1)"
+fi
+```
+
+Then use `uv run --script "$QUERY_SCRIPT" sql "..."` for all queries below.
+
 ## Schema reference (for adapting queries)
 
 When the user specifies a date range, add WHERE clauses. Use these join paths:
@@ -52,8 +65,10 @@ ${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT tc.tool_name, COUNT(*) uses F
 ```
 
 ### Longest session ever
+
+NOTE: `first_prompt` contains raw Cursor system context (XML tags). Use `regexp_extract` to get the actual user prompt:
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT project_name, created_at::DATE, message_count, LEFT(first_prompt, 100) prompt FROM sessions ORDER BY message_count DESC LIMIT 1"
+${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT project_name, created_at::DATE, message_count, LEFT(COALESCE(NULLIF(regexp_extract(first_prompt, '<user_query>\s*([\s\S]*?)\s*</user_query>', 1), ''), NULLIF(regexp_extract(first_prompt, '(/\S+[^\n<]*)', 1), ''), first_prompt), 200) AS prompt FROM sessions ORDER BY message_count DESC LIMIT 1"
 ```
 
 ### Busiest day

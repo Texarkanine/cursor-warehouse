@@ -287,6 +287,147 @@ class TestIngestJsonl:
 
 
 # ---------------------------------------------------------------------------
+# User Query Extraction Tests
+# ---------------------------------------------------------------------------
+
+class TestExtractUserQuery:
+    """Tests for extract_user_query — stripping system context from user messages."""
+
+    def test_extracts_user_query_from_xml_tags(self):
+        """Content inside <user_query> tags is extracted cleanly."""
+        import sync
+        raw = (
+            "<rules>\nSome rules.\n</rules>\n"
+            "<user_query>\nRefactor the auth module.\n</user_query>"
+        )
+        assert sync.extract_user_query(raw) == "Refactor the auth module."
+
+    def test_extracts_multiline_user_query(self):
+        """Multi-line content inside <user_query> tags is preserved."""
+        import sync
+        raw = (
+            "<rules>\nStuff.\n</rules>\n"
+            "<user_query>\nFirst line.\nSecond line.\nThird line.\n</user_query>"
+        )
+        result = sync.extract_user_query(raw)
+        assert "First line." in result
+        assert "Second line." in result
+        assert "Third line." in result
+
+    def test_extracts_slash_command_from_skill_invocation(self):
+        """Skill invocations without <user_query> extract the /command."""
+        import sync
+        raw = (
+            "<manually_attached_skills>\n"
+            "The user has manually attached the following skills.\n"
+            "Skill Name: cw-wrapped\n"
+            "</manually_attached_skills>\n"
+            "<user_query>\n/wrapped\n</user_query>"
+        )
+        result = sync.extract_user_query(raw)
+        assert result == "/wrapped"
+
+    def test_skill_only_no_user_query_tag_extracts_slash_command(self):
+        """When there's no <user_query> tag at all, extract /command if present."""
+        import sync
+        raw = (
+            "<manually_attached_skills>\n"
+            "Skill content here.\n"
+            "</manually_attached_skills>\n"
+            "<git_status>\n## main\n</git_status>\n"
+            "/cw-report generate a report for me"
+        )
+        result = sync.extract_user_query(raw)
+        assert result is not None
+        assert result.startswith("/cw-report")
+
+    def test_plain_text_without_xml_returned_as_is(self):
+        """Messages without XML system context are returned unchanged."""
+        import sync
+        raw = "Help me refactor the authentication module."
+        assert sync.extract_user_query(raw) == raw
+
+    def test_continuation_message_returns_as_is(self):
+        """Auto-generated continuation messages have no XML and are returned as-is."""
+        import sync
+        raw = "Your previous response was interrupted. Continue from where you left off."
+        assert sync.extract_user_query(raw) == raw
+
+    def test_none_input_returns_none(self):
+        import sync
+        assert sync.extract_user_query(None) is None
+
+    def test_empty_string_returns_none(self):
+        import sync
+        assert sync.extract_user_query("") is None
+
+    def test_system_context_only_no_user_content_returns_none(self):
+        """Messages with only system context and no user intent return None."""
+        import sync
+        raw = (
+            "<rules>\nSome rules.\n</rules>\n"
+            "<open_and_recently_viewed_files>\nfile.py\n</open_and_recently_viewed_files>"
+        )
+        assert sync.extract_user_query(raw) is None
+
+    def test_user_query_with_surrounding_whitespace_stripped(self):
+        """Leading/trailing whitespace inside <user_query> is stripped."""
+        import sync
+        raw = "<user_query>\n   \n  Do the thing.  \n   \n</user_query>"
+        assert sync.extract_user_query(raw) == "Do the thing."
+
+    def test_greedy_match_survives_user_typing_closing_tag(self):
+        """If user types </user_query> inside their prompt, we match to the LAST closing tag."""
+        import sync
+        raw = (
+            "<user_query>\n"
+            "What does </user_query> do in the XML?\n"
+            "I'm curious about the tag.\n"
+            "</user_query>"
+        )
+        result = sync.extract_user_query(raw)
+        assert result is not None
+        assert "What does </user_query> do in the XML?" in result
+        assert "I'm curious about the tag." in result
+
+    def test_user_query_stored_in_messages_table(self, db):
+        """Ingested messages populate the user_query column."""
+        import sync
+        fp = FIXTURES_DIR / "cursor_system_context.jsonl"
+        result = sync._ingest_jsonl(db, fp, session_id="context-session")
+        assert result is not None
+
+        rows = db.execute(
+            "SELECT role, user_query FROM messages "
+            "WHERE session_id = 'context-session' ORDER BY uuid"
+        ).fetchall()
+
+        user_msgs = [(r[0], r[1]) for r in rows if r[0] == 'user']
+        assert len(user_msgs) >= 3
+
+        # First user message: has <user_query> with real content
+        assert user_msgs[0][1] is not None
+        assert "Refactor the auth module" in user_msgs[0][1]
+
+        # Third user message: skill invocation with /wrapped
+        assert user_msgs[1][1] is not None
+        assert "/wrapped" in user_msgs[1][1]
+
+    def test_user_query_null_for_assistant_messages(self, db):
+        """Assistant messages have user_query = NULL."""
+        import sync
+        fp = FIXTURES_DIR / "cursor_system_context.jsonl"
+        sync._ingest_jsonl(db, fp, session_id="context-session")
+
+        rows = db.execute(
+            "SELECT user_query FROM messages "
+            "WHERE session_id = 'context-session' AND role = 'assistant'"
+        ).fetchall()
+        for row in rows:
+            assert row[0] is None
+
+
+# ---------------------------------------------------------------------------
 # Discovery Tests
 # ---------------------------------------------------------------------------
 

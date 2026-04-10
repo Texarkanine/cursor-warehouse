@@ -14,18 +14,29 @@ Search across all past Cursor agent sessions stored in the local DuckDB warehous
 - "What did I do in project Y?"
 - "Find all sessions where we discussed Z"
 
+## Finding the scripts
+
+`CURSOR_PLUGIN_ROOT` should be set when invoked through the plugin system, but may be unset during development. Resolve once per session:
+
+```bash
+PLUGIN_SCRIPTS="${CURSOR_PLUGIN_ROOT:+$CURSOR_PLUGIN_ROOT/scripts}"
+if [ -z "$PLUGIN_SCRIPTS" ] || [ ! -d "$PLUGIN_SCRIPTS" ]; then
+  PLUGIN_SCRIPTS="$(dirname "$(find ~/.cursor/plugins -name query.py -path '*/cursor-warehouse/*/query.py' 2>/dev/null | head -1)")"
+fi
+```
+
 ## How to search
 
 Always run BOTH searches — they complement each other.
 
 ### 1. Keyword search (exact substring match)
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py search "$ARGUMENTS"
+uv run --script "$PLUGIN_SCRIPTS/query.py" search "$ARGUMENTS"
 ```
 
 ### 2. Semantic search (meaning-based, finds related concepts)
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/vsearch.py "$ARGUMENTS"
+uv run --script "$PLUGIN_SCRIPTS/vsearch.py" "$ARGUMENTS"
 ```
 Finds results even when exact words don't match. Supports filters: `--project X`, `--days N`, `--type message|session`, `--limit N`.
 

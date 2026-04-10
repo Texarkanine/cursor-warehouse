@@ -9,6 +9,19 @@ Generate a comprehensive analytics report on the user's Cursor agent usage patte
 
 Run ALL of the following queries and synthesize the results into a clear, actionable report.
 
+## Finding the script
+
+`CURSOR_PLUGIN_ROOT` should be set when invoked through the plugin system, but may be unset during development. Resolve once per session:
+
+```bash
+QUERY_SCRIPT="${CURSOR_PLUGIN_ROOT:+$CURSOR_PLUGIN_ROOT/scripts/query.py}"
+if [ -z "$QUERY_SCRIPT" ] || [ ! -f "$QUERY_SCRIPT" ]; then
+  QUERY_SCRIPT="$(find ~/.cursor/plugins -name query.py -path '*/cursor-warehouse/*/query.py' 2>/dev/null | head -1)"
+fi
+```
+
+Then use `uv run --script "$QUERY_SCRIPT" sql "..."` for all queries below.
+
 ## Schema reference (for adapting queries)
 
 When the user specifies a date range, add WHERE clauses. Use these join paths:
@@ -63,8 +76,10 @@ ${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT DATE_TRUNC('week', s.created_
 
 ## 6. First prompt quality signal
 
+NOTE: `first_prompt` contains raw Cursor system context (XML tags like `<user_query>`, `<rules>`, etc.), so `LENGTH(first_prompt)` measures the *entire framed message*, not just the user's words. Extract user intent with `regexp_extract` before measuring length:
+
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT CASE WHEN LENGTH(first_prompt) < 50 THEN 'short (<50 chars)' WHEN LENGTH(first_prompt) < 200 THEN 'medium (50-200)' ELSE 'detailed (200+)' END as prompt_length, COUNT(*) sessions, ROUND(AVG(message_count), 1) avg_msgs FROM sessions WHERE created_at >= current_date - INTERVAL '30 days' AND first_prompt IS NOT NULL GROUP BY 1 ORDER BY MIN(LENGTH(first_prompt))"
+${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "WITH prompts AS (SELECT session_id, message_count, LENGTH(COALESCE(NULLIF(regexp_extract(first_prompt, '<user_query>\s*([\s\S]*?)\s*</user_query>', 1), ''), NULLIF(regexp_extract(first_prompt, '(/\S+[^\n<]*)', 1), ''), first_prompt)) AS prompt_len FROM sessions WHERE created_at >= current_date - INTERVAL '30 days' AND first_prompt IS NOT NULL) SELECT CASE WHEN prompt_len < 50 THEN 'short (<50 chars)' WHEN prompt_len < 200 THEN 'medium (50-200)' ELSE 'detailed (200+)' END as prompt_length, COUNT(*) sessions, ROUND(AVG(message_count), 1) avg_msgs FROM prompts GROUP BY 1 ORDER BY MIN(prompt_len)"
 ```
 
 ## 7. AI attribution summary (from scored_commits)

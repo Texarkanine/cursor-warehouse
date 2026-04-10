@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content_types JSON,
     tool_name VARCHAR,
     text_content VARCHAR,
+    user_query VARCHAR,
     PRIMARY KEY (session_id, uuid)
 );
 
