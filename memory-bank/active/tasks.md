@@ -330,9 +330,9 @@ None — implementation approach is clear. VISIONA provides detailed specificati
     - Files: `.cursor-plugin/plugin.json`
     - Changes: New file with cursor-warehouse metadata, version 0.1.0, MIT license
 
-17. **Create `.cursor/hooks.json`**
-    - Files: `.cursor/hooks.json`
-    - Changes: Cursor-format hooks file (version 1, `sessionStart` event — camelCase per Cursor convention) with sync + dashboard commands
+17. **Create `hooks/hooks.json`**
+    - Files: `hooks/hooks.json`
+    - Changes: Cursor-format hooks file (version 1, `sessionStart` event — camelCase per Cursor convention) with sync + dashboard commands using `${CURSOR_PLUGIN_ROOT}` paths. README will document manual `.cursor/hooks.json` setup for non-plugin installs.
 
 18. **Port skills**
     - Files:
