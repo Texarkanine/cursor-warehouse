@@ -1,0 +1,4 @@
+{"role":"user","message":{"role":"user","content":[{"type":"text","text":"Search for all test files related to authentication."}]}}
+{"role":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_sub_01","name":"Glob","input":{"pattern":"**/test_auth*.py"}}]}}
+{"role":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sub_01","content":"tests/test_auth.py\ntests/test_auth_middleware.py"}]}}
+{"role":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Found 2 test files related to authentication: test_auth.py and test_auth_middleware.py."}]}}

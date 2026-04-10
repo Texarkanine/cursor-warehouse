@@ -1,0 +1,5 @@
+{"role":"user","message":{"role":"user","content":[{"type":"text","text":"Valid first line."}]}}
+{this is not valid json at all
+{"role":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Valid third line after malformed."}]}}
+another bad line {{{
+{"role":"user","message":{"role":"user","content":[{"type":"text","text":"Valid last line."}]}}

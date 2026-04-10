@@ -6,7 +6,7 @@ Direct port of [claude-warehouse](https://github.com/sderosiaux/claude-warehouse
 
 ## Requirements
 
-Full scope defined in `agent-warehouse/memory-bank/VISIONA.md`. Key deliverables:
+Full scope defined in `memory-bank/VISIONA.md`. Key deliverables:
 
 1. Copy all upstream files preserving PEP 723 / `uv run --script` pattern
 2. Schema: add `harness TEXT NOT NULL DEFAULT 'cursor'` to provenance tables; drop Claude-specific tables

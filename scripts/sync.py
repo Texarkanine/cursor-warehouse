@@ -1,0 +1,478 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["duckdb>=1.2"]
+# ///
+"""cursor-warehouse: incremental ETL from Cursor agent transcripts into DuckDB."""
+
+import argparse
+import json
+import time
+from pathlib import Path
+
+import duckdb
+
+CURSOR_DIR = Path.home() / ".cursor"
+DB_PATH = CURSOR_DIR / "cursor-warehouse.duckdb"
+SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+
+
+def init_db(con: duckdb.DuckDBPyConnection):
+    con.execute(SCHEMA_PATH.read_text())
+
+
+def get_watermark(con: duckdb.DuckDBPyConnection, source: str) -> float:
+    r = con.execute(
+        "SELECT last_mtime FROM _sync_state WHERE source_name = ?", [source]
+    ).fetchone()
+    return r[0] if r else 0.0
+
+
+def set_watermark(con: duckdb.DuckDBPyConnection, source: str, mtime: float, files: int, rows: int):
+    con.execute("""
+        INSERT INTO _sync_state (source_name, last_mtime, last_run, files_synced, rows_synced)
+        VALUES (?, ?, current_timestamp, ?, ?)
+        ON CONFLICT (source_name)
+        DO UPDATE SET last_mtime = excluded.last_mtime,
+                      last_run = excluded.last_run,
+                      files_synced = _sync_state.files_synced + excluded.files_synced,
+                      rows_synced = _sync_state.rows_synced + excluded.rows_synced
+    """, [source, mtime, files, rows])
+
+
+def truncate(s: str | None, maxlen: int = 500) -> str | None:
+    if s is None:
+        return None
+    return s[:maxlen] if len(s) > maxlen else s
+
+
+# ---------------------------------------------------------------------------
+# Sessions + Messages + Tool Calls (main + subagent JSONL)
+# ---------------------------------------------------------------------------
+
+def extract_text_content(content_blocks) -> str | None:
+    """Extract concatenated text from content blocks (list of dicts/strings or a plain string)."""
+    if isinstance(content_blocks, str):
+        return content_blocks
+    if not isinstance(content_blocks, list):
+        return None
+    texts = []
+    for block in content_blocks:
+        if isinstance(block, dict):
+            if block.get("type") == "text":
+                texts.append(block.get("text", ""))
+        elif isinstance(block, str):
+            texts.append(block)
+    return "\n".join(texts) if texts else None
+
+
+def extract_first_prompt(content) -> str | None:
+    """Extract the first user prompt text, truncated to 1000 chars."""
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return truncate(block.get("text", ""), 1000)
+            elif isinstance(block, str):
+                return truncate(block, 1000)
+    elif isinstance(content, str):
+        return truncate(content, 1000)
+    return None
+
+
+def _derive_project_name(workspace_slug: str) -> str:
+    """Derive a human-readable project name from a Cursor workspace slug.
+
+    Workspace slugs encode paths with hyphens, e.g.
+    'home-mobaxterm-Documents-git-myproject' -> 'myproject'
+    We take the last segment as the project name.
+    """
+    if not workspace_slug:
+        return ""
+    parts = workspace_slug.split("-")
+    return parts[-1] if parts else workspace_slug
+
+
+def _ingest_jsonl(con: duckdb.DuckDBPyConnection, fp: Path, session_id: str,
+                  is_subagent: bool = False, parent_session_id: str | None = None):
+    """Parse a single Cursor JSONL file into sessions/messages/tool_calls.
+
+    Returns (session_id, msg_count) or None if no messages found.
+    """
+    messages = []
+    tool_calls_batch = []
+    first_user_prompt = None
+    tools_seen = set()
+    models_seen = set()
+
+    try:
+        with open(fp) as f:
+            for line_idx, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                msg_uuid = f"{session_id}:{line_idx}"
+                msg_payload = rec.get("message", {})
+                if not isinstance(msg_payload, dict):
+                    continue
+
+                role = rec.get("role") or msg_payload.get("role")
+                msg_type = role or ""
+                content = msg_payload.get("content", [])
+                model = msg_payload.get("model")
+
+                if model:
+                    models_seen.add(model)
+
+                content_types = []
+                tool_name = None
+                text_content = None
+
+                if isinstance(content, list):
+                    for i, block in enumerate(content):
+                        if not isinstance(block, dict):
+                            continue
+                        bt = block.get("type", "")
+                        if bt and bt not in content_types:
+                            content_types.append(bt)
+
+                        if bt == "tool_use":
+                            tn = block.get("name", "")
+                            tools_seen.add(tn)
+                            if not tool_name:
+                                tool_name = tn
+
+                            tool_calls_batch.append((
+                                session_id, msg_uuid, i,
+                                tn,
+                                truncate(json.dumps(block.get("input", {}), default=str), 500),
+                                None,  # timestamp
+                            ))
+
+                text_content = extract_text_content(content)
+
+                if msg_type == "user" and first_user_prompt is None:
+                    first_user_prompt = extract_first_prompt(content)
+
+                messages.append((
+                    session_id, msg_uuid,
+                    msg_type,
+                    None,  # timestamp
+                    role, model,
+                    json.dumps(content_types) if content_types else None,
+                    tool_name,
+                    truncate(text_content, 2000),
+                ))
+    except Exception:
+        return None
+
+    if not messages:
+        return None
+
+    file_mtime = fp.stat().st_mtime
+    from datetime import datetime, timezone
+    file_ts = datetime.fromtimestamp(file_mtime, tz=timezone.utc)
+
+    # Derive project info from path structure
+    # Path: .../projects/<workspace-slug>/agent-transcripts/<session-id>/<session-id>.jsonl
+    project_path = str(fp.parent)
+    workspace_slug = ""
+    parts = fp.parts
+    for i, part in enumerate(parts):
+        if part == "agent-transcripts" and i > 0:
+            workspace_slug = parts[i - 1]
+            break
+    project_name = _derive_project_name(workspace_slug)
+
+    con.execute("""
+        INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT (session_id) DO UPDATE SET
+            modified_at = excluded.modified_at,
+            message_count = excluded.message_count,
+            tools_used = excluded.tools_used,
+            models_used = excluded.models_used,
+            first_prompt = excluded.first_prompt
+    """, [
+        session_id, "cursor",
+        project_path, project_name,
+        file_ts.isoformat(), file_ts.isoformat(),
+        len(messages),
+        json.dumps(sorted(tools_seen)),
+        json.dumps(sorted(models_seen)),
+        first_user_prompt, str(fp),
+        is_subagent, parent_session_id,
+    ])
+
+    # Dedup: delete and reinsert
+    con.execute("DELETE FROM messages WHERE session_id = ?", [session_id])
+    con.execute("DELETE FROM tool_calls WHERE session_id = ?", [session_id])
+
+    if messages:
+        deduped = {(m[0], m[1]): m for m in messages}
+        con.executemany(
+            "INSERT INTO messages (session_id, uuid, type, timestamp, role, model, "
+            "content_types, tool_name, text_content) VALUES (?,?,?,?,?,?,?,?,?)",
+            list(deduped.values()),
+        )
+    if tool_calls_batch:
+        deduped_tc = {(t[0], t[1], t[2]): t for t in tool_calls_batch}
+        con.executemany(
+            "INSERT INTO tool_calls (session_id, message_uuid, idx, tool_name, tool_input, timestamp) "
+            "VALUES (?,?,?,?,?,?)",
+            list(deduped_tc.values()),
+        )
+
+    return session_id, len(messages)
+
+
+def _scan_jsonl_files(projects_dir: Path, session_wm: float, subagent_wm: float):
+    """Single rglob scan partitioned into sessions and subagents."""
+    sessions = []
+    subagents = []
+
+    if not projects_dir.exists():
+        return sessions, subagents
+
+    for ws_dir in projects_dir.iterdir():
+        if not ws_dir.is_dir():
+            continue
+        transcripts_dir = ws_dir / "agent-transcripts"
+        if not transcripts_dir.exists():
+            continue
+
+        for p in transcripts_dir.rglob("*.jsonl"):
+            if not p.is_file():
+                continue
+            mtime = p.stat().st_mtime
+            is_sub = "/subagents/" in str(p) or "\\subagents\\" in str(p)
+            if is_sub and mtime > subagent_wm:
+                subagents.append((mtime, p))
+            elif not is_sub and mtime > session_wm:
+                sessions.append((mtime, p))
+
+    sessions.sort(key=lambda x: x[0])
+    subagents.sort(key=lambda x: x[0])
+    return sessions, subagents
+
+
+def sync_sessions(con: duckdb.DuckDBPyConnection, session_files: list[tuple[float, Path]],
+                  verbose: bool = False):
+    wm = get_watermark(con, "sessions")
+
+    if verbose:
+        print(f"  Sessions: {len(session_files)} files to process")
+
+    max_mtime = wm
+    total_rows = 0
+
+    for mtime, fp in session_files:
+        max_mtime = max(max_mtime, mtime)
+        session_id = fp.stem
+        result = _ingest_jsonl(con, fp, session_id=session_id, is_subagent=False)
+        if result:
+            total_rows += result[1]
+
+    set_watermark(con, "sessions", max_mtime, len(session_files), total_rows)
+
+
+def sync_subagents(con: duckdb.DuckDBPyConnection, subagent_files: list[tuple[float, Path]],
+                   verbose: bool = False):
+    if verbose:
+        print(f"  Subagents: {len(subagent_files)} files to process")
+
+    wm = get_watermark(con, "subagents")
+    max_mtime = wm
+    total_rows = 0
+
+    for mtime, fp in subagent_files:
+        max_mtime = max(max_mtime, mtime)
+        subagent_id = fp.stem
+
+        # Derive parent session ID from path structure
+        # .../agent-transcripts/<parent-id>/subagents/<subagent>.jsonl
+        parent_dir = fp.parent.parent
+        parent_sid = parent_dir.name if parent_dir.name != "subagents" else None
+
+        result = _ingest_jsonl(
+            con, fp, session_id=subagent_id,
+            is_subagent=True, parent_session_id=parent_sid,
+        )
+        if result:
+            total_rows += result[1]
+
+    set_watermark(con, "subagents", max_mtime, len(subagent_files), total_rows)
+
+
+def sync_all(con: duckdb.DuckDBPyConnection, projects_dir: Path, verbose: bool = False):
+    """Run the full sync pipeline against a projects directory."""
+    session_wm = get_watermark(con, "sessions")
+    subagent_wm = get_watermark(con, "subagents")
+    session_files, subagent_files = _scan_jsonl_files(projects_dir, session_wm, subagent_wm)
+
+    sync_sessions(con, session_files, verbose=verbose)
+    sync_subagents(con, subagent_files, verbose=verbose)
+
+
+# ---------------------------------------------------------------------------
+# Tracking DB Integration (ai-code-tracking.db)
+# ---------------------------------------------------------------------------
+
+def _find_tracking_db() -> Path | None:
+    """Discover ai-code-tracking.db from known locations."""
+    candidates = [
+        CURSOR_DIR / "ai-tracking" / "ai-code-tracking.db",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def sync_tracking_db(con: duckdb.DuckDBPyConnection, tracking_db_path: Path | None = None,
+                     verbose: bool = False):
+    """Read ai-code-tracking.db to populate messages.model and scored_commits.
+
+    Gracefully skips if the tracking DB is missing or locked.
+    """
+    if tracking_db_path is None:
+        tracking_db_path = _find_tracking_db()
+    if tracking_db_path is None or not tracking_db_path.exists():
+        if verbose:
+            print("  Tracking DB not found — skipping model enrichment and scored_commits")
+        return
+
+    import sqlite3
+
+    try:
+        tracking_con = sqlite3.connect(f"file:{tracking_db_path}?immutable=1", uri=True)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
+        if verbose:
+            print(f"  Tracking DB locked or inaccessible: {e}")
+        return
+
+    try:
+        _sync_model_from_tracking(con, tracking_con, verbose)
+        _sync_scored_commits(con, tracking_con, verbose)
+    finally:
+        tracking_con.close()
+
+
+def _sync_model_from_tracking(con: duckdb.DuckDBPyConnection, tracking_con, verbose: bool = False):
+    """Populate messages.model via ai_code_hashes join on conversationId."""
+    import sqlite3
+
+    try:
+        rows = tracking_con.execute(
+            "SELECT DISTINCT conversationId, model FROM ai_code_hashes "
+            "WHERE conversationId IS NOT NULL AND model IS NOT NULL"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        if verbose:
+            print("  ai_code_hashes table not found in tracking DB")
+        return
+
+    if not rows:
+        return
+
+    updated = 0
+    for conversation_id, model in rows:
+        result = con.execute(
+            "UPDATE messages SET model = ? WHERE session_id = ? AND model IS NULL",
+            [model, conversation_id],
+        )
+        updated += result.fetchone()[0] if result.description else 0
+
+    if verbose:
+        print(f"  Model enrichment: {len(rows)} conversation-model pairs from tracking DB")
+
+
+def _sync_scored_commits(con: duckdb.DuckDBPyConnection, tracking_con, verbose: bool = False):
+    """Import scored_commits from tracking DB with camelCase to snake_case mapping."""
+    import sqlite3
+
+    try:
+        rows = tracking_con.execute(
+            "SELECT commitHash, branchName, scoredAt, linesAdded, linesDeleted, "
+            "tabLinesAdded, tabLinesDeleted, composerLinesAdded, composerLinesDeleted, "
+            "humanLinesAdded, humanLinesDeleted, blankLinesAdded, blankLinesDeleted, "
+            "commitMessage, commitDate, v1AiPercentage, v2AiPercentage "
+            "FROM scored_commits"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        if verbose:
+            print("  scored_commits table not found in tracking DB")
+        return
+
+    if not rows:
+        return
+
+    for row in rows:
+        con.execute("""
+            INSERT INTO scored_commits VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT (commit_hash, branch_name) DO UPDATE SET
+                scored_at = excluded.scored_at,
+                lines_added = excluded.lines_added,
+                lines_deleted = excluded.lines_deleted
+        """, [
+            row[0], row[1], "cursor", row[2],
+            row[3], row[4], row[5], row[6], row[7], row[8],
+            row[9], row[10], row[11], row[12], row[13], row[14],
+            row[15], row[16],
+        ])
+
+    if verbose:
+        print(f"  Scored commits: {len(rows)} imported")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="cursor-warehouse sync")
+    parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--full", action="store_true", help="Reset watermarks and re-sync everything")
+    parser.add_argument("--compact", action="store_true", help="Vacuum and checkpoint DB after sync")
+    parser.add_argument("--db", default=str(DB_PATH), help="Database path")
+    args = parser.parse_args()
+
+    t0 = time.time()
+    con = duckdb.connect(args.db)
+    init_db(con)
+
+    if args.full:
+        con.execute("DELETE FROM _sync_state")
+        if args.verbose:
+            print("Reset all watermarks for full re-sync")
+
+    if args.verbose:
+        print(f"Syncing to {args.db}")
+
+    projects_dir = CURSOR_DIR / "projects"
+    sync_all(con, projects_dir, verbose=args.verbose)
+
+    try:
+        sync_tracking_db(con, verbose=args.verbose)
+    except Exception as e:
+        if args.verbose:
+            print(f"  Tracking DB sync failed (non-fatal): {e}")
+
+    if args.compact:
+        if args.verbose:
+            print("  Compacting database...")
+        con.execute("CHECKPOINT")
+        con.execute("VACUUM")
+
+    con.close()
+
+    elapsed = time.time() - t0
+    if args.verbose:
+        print(f"Done in {elapsed:.1f}s")
+
+
+if __name__ == "__main__":
+    main()
