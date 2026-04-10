@@ -1,5 +1,4 @@
 PASS
-timestamp: 2026-04-10
-task-id: visiona-port
-findings-fixed: 5
-findings-blocking: 0
+task: visiona-pr-rework
+date: 2026-04-10
+findings: 1 trivial (fixed)

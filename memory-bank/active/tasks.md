@@ -358,4 +358,4 @@ No new external technology. `hook-launcher.py` uses only Python stdlib (`subproc
 - [x] Technology validation complete (stdlib only)
 - [x] Preflight
 - [x] Build
-- [ ] QA
+- [x] QA

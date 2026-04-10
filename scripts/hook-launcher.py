@@ -35,13 +35,13 @@ def main():
               "stderr": subprocess.DEVNULL, **_detach_kwargs()}
 
     subprocess.Popen(
-        [sys.executable, str(SCRIPTS_DIR / "sync.py")],
+        ["uv", "run", "--script", str(SCRIPTS_DIR / "sync.py")],
         **common,
     )
 
     if not _port_in_use(PORT):
         subprocess.Popen(
-            [sys.executable, str(SCRIPTS_DIR / "dashboard.py")],
+            ["uv", "run", "--script", str(SCRIPTS_DIR / "dashboard.py")],
             **common,
         )
 
