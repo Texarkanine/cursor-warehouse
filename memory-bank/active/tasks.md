@@ -4,15 +4,15 @@
 * Complexity: Level 3
 * Type: fix (rework from PR review feedback)
 
-Address valid findings from CodeRabbit and LlamaPReview automated reviews on [PR #1](https://github.com/Texarkanine/cursor-warehouse/pull/1). Feedback has been triaged into "valid and worth reworking" vs "not valid / not worth reworking" with justifications.
+Address valid findings from CodeRabbit and LlamaPReview automated reviews on [PR #1](https://github.com/Texarkanine/cursor-warehouse/pull/1), plus two architectural improvements identified during review: fork-and-return hook architecture and `cw:` skill namespace prefix.
 
 ## PR Feedback Triage
 
 ### VALID AND WORTH REWORKING
 
-#### R1. hooks/hooks.json: Remove `&` backgrounding from hook commands
-**Source:** CodeRabbit (Major) + LlamaPReview (P1)
-**Justification:** Cursor hooks run synchronously with managed timeouts. The `&` detaches the process immediately, breaking timeout enforcement, error handling, and enabling duplicate process spawning. `sync.py` completes quickly (<5s) and should run synchronously. `dashboard.py` has `serve_forever()` (blocks forever) so it can't run synchronously — it must be spawned from sync.py after sync completes (if not already running), not from the hook directly.
+#### R1. Hook architecture: fork-and-return instead of `&` backgrounding
+**Source:** CodeRabbit (Major) + LlamaPReview (P1) + investigation
+**Justification:** Cursor hooks run synchronously with managed timeouts and kill the process on timeout. The `&` detaches the process immediately, breaking timeout enforcement and error handling. But sync can't run synchronously either — initial sync takes 10-30+ seconds for 200+ sessions. **The upstream claude-warehouse explicitly separates sync from hooks** (sync runs via launchd cron, only dashboard is in the hook). Our solution: a thin `hook-launcher.py` that forks sync.py + dashboard.py as fully detached processes (`start_new_session=True` on POSIX, `DETACHED_PROCESS` on Windows) and returns immediately. The launcher completes within milliseconds; the forked processes survive Cursor quitting. DuckDB's write lock (already handled at sync.py line 504-508) prevents concurrent sync conflicts.
 
 #### R2. scripts/sync.py: ON CONFLICT for scored_commits only updates 3 of 15 mutable fields
 **Source:** CodeRabbit (Nitpick)
@@ -58,6 +58,14 @@ Address valid findings from CodeRabbit and LlamaPReview automated reviews on [PR
 **Source:** CodeRabbit (Nitpick)
 **Justification:** Three occurrences of unpacked-but-unused variables (`sid`, `subagents`). Prefixing with `_` signals intent. Trivial.
 
+#### R13. Skill namespace: add `cw:` prefix to all skill names and directories
+**Source:** Investigation
+**Justification:** Cursor doesn't namespace plugin skills — all installed plugins share a flat skill namespace. Generic names like `query`, `recall`, `report` will collide with other plugins. Adding `cw:` prefix prevents collisions and clearly signals "cursor-warehouse" origin. Directories use hyphens (`cw-query/`), frontmatter `name:` uses colons (`cw:query`).
+
+#### R14. New `cw:initialize` skill for first-time setup
+**Source:** Investigation
+**Justification:** Initial sync takes 10-30+ seconds and can't run in a hook. Users need an explicit first-time setup experience that runs `sync.py --full --verbose` interactively with progress feedback, then optionally `embed.py --verbose` for semantic search. Without this, first-time users get an empty warehouse with no guidance.
+
 ### NOT VALID AND/OR NOT WORTH REWORKING
 
 #### N1. scripts/schema.sql: Include harness in composite primary keys
@@ -92,39 +100,82 @@ Address valid findings from CodeRabbit and LlamaPReview automated reviews on [PR
 **Source:** CodeRabbit (various)
 **Justification:** Memory-bank files are development process documents, not shipped code. The reflection accurately captured the state at writing time. The hooks naming "conflict" is already explained in context (hooks.json is the source, .cursor/hooks.json is the install target). VISIONA.md language tags are cosmetic. None affect functionality or user experience.
 
+## Pinned Info
+
+### Hook Architecture (fork-and-return)
+
+Why: Cursor kills hook processes on timeout. Initial sync is too slow for synchronous hooks. Upstream claude-warehouse uses cron for sync, not hooks. Our approach: a thin launcher that forks detached processes and returns immediately.
+
+```mermaid
+sequenceDiagram
+    participant Cursor
+    participant Launcher as hook-launcher.py
+    participant Sync as sync.py (detached)
+    participant Dash as dashboard.py (detached)
+    participant DB as cursor-warehouse.duckdb
+
+    Cursor->>Launcher: sessionStart hook (timeout: 10s)
+    Launcher->>Sync: Popen(start_new_session=True)
+    Launcher->>Dash: Popen(start_new_session=True) [if port 3141 free]
+    Launcher-->>Cursor: exit 0 (immediate)
+    Note over Launcher: Hook completes in <1s
+
+    Sync->>DB: incremental ETL (survives Cursor exit)
+    Dash->>Dash: serve_forever on :3141 (survives Cursor exit)
+```
+
+### Skill Namespace Mapping
+
+| Old Dir | Old Name | New Dir | New Name |
+|---|---|---|---|
+| `skills/query/` | `query` | `skills/cw-query/` | `cw:query` |
+| `skills/recall/` | `recall` | `skills/cw-recall/` | `cw:recall` |
+| `skills/report/` | `report` | `skills/cw-report/` | `cw:report` |
+| `skills/wrapped/` | `wrapped` | `skills/cw-wrapped/` | `cw:wrapped` |
+| *(new)* | — | `skills/cw-initialize/` | `cw:initialize` |
+
 ## Component Analysis
 
 ### Affected Components
 
-- **`hooks/hooks.json`**: Hook configuration → remove `&` from sync, restructure dashboard startup
-- **`scripts/sync.py`**: ETL pipeline → fix scored_commits upsert, add error logging, improve exception messages, spawn dashboard after sync
+- **`scripts/hook-launcher.py`** (NEW): Thin sessionStart hook launcher — forks sync.py + dashboard.py as detached processes, returns immediately. ~25 lines. Cross-platform (`start_new_session` on POSIX, `DETACHED_PROCESS` on Windows).
+- **`hooks/hooks.json`**: Hook configuration → replace two `&`-backgrounded hooks with single `hook-launcher.py` call (no `&`, short timeout)
+- **`scripts/sync.py`**: ETL pipeline → fix scored_commits upsert, add error logging, improve exception messages
 - **`scripts/embed.py`**: Embedding pipeline → fix double-prefixed source_id
 - **`scripts/vsearch.py`**: Vector search → fix INTERVAL SQL syntax
 - **`scripts/dashboard.py`**: HTTP dashboard → fix MAX(model) to deterministic summary
 - **`scripts/query.py`**: CLI query → fix MAX(model) to deterministic summary
 - **`static/index.html`**: Dashboard frontend → add XSS escaping, handle non-2xx responses
-- **`skills/report/SKILL.md`**: Skill doc → fix off-by-one label, add language tag
-- **`skills/wrapped/SKILL.md`**: Skill doc → add language tag
-- **`skills/query/SKILL.md`**: Skill doc → add language tag
+- **`skills/cw-query/SKILL.md`** (RENAMED): Add `cw:` prefix, add language tag to code fence
+- **`skills/cw-recall/SKILL.md`** (RENAMED): Add `cw:` prefix
+- **`skills/cw-report/SKILL.md`** (RENAMED): Add `cw:` prefix, fix off-by-one label, add language tag
+- **`skills/cw-wrapped/SKILL.md`** (RENAMED): Add `cw:` prefix, add language tag
+- **`skills/cw-initialize/SKILL.md`** (NEW): First-time setup skill — guides running sync.py --full, embed.py, and dashboard.py
 - **`tests/test_sync.py`**: Tests → prefix unused variables
+- **`.cursor-plugin/plugin.json`**: Update skills path reference if needed (currently `"./skills/"` — should still work since we're renaming dirs not the parent)
 
 ### Cross-Module Dependencies
 
 - `embed.py` source_id fix (R4) must match `vsearch.py` enrichment logic
 - `embed.py` source_id fix (R4) must match `count_unembedded()` and `clean_stale_embeddings()` queries
-- Dashboard startup change (R1) requires `sync.py` to spawn `dashboard.py`
+- `hook-launcher.py` (R1) must find `sync.py` and `dashboard.py` relative to itself
+- Skill rename (R13) must be reflected in any cross-references between skills, README, and plugin.json
+- `cw:initialize` skill (R14) must reference correct script paths via `${CURSOR_PLUGIN_ROOT}`
 
 ### Boundary Changes
 
 - `embed.py` embeddings.source_id format changes from `session_id:session_id:line_idx` to `session_id:line_idx` — existing embeddings will become stale and be cleaned up on next `embed.py --full` run
-- Hook commands change — users with existing plugin installs will get new behavior on update
+- Hook commands change completely — single launcher replaces two backgrounded scripts
+- Skill names change — users referencing old names (`query`, `recall`, etc.) will need to use `cw:query`, `cw:recall`, etc.
 
 ### Invariants & Constraints
 
 1. All existing 53 tests must continue passing
-2. No new dependencies
+2. No new external dependencies (subprocess, socket, sys, os are stdlib)
 3. Backward compatibility: existing embeddings cleaned gracefully (not crash)
-4. Hook changes must not break non-plugin installs
+4. Hook launcher must be cross-platform (POSIX + Windows)
+5. Forked processes must survive Cursor exit (fully detached)
+6. DuckDB write lock prevents concurrent sync conflicts (already handled)
 
 ## Open Questions
 
@@ -148,19 +199,24 @@ None — all rework items have clear implementations.
 **R7 (ingest error logging):**
 - Malformed file produces stderr warning (not silent skip)
 
+**R1 (hook launcher):**
+- Launcher script exits 0 immediately
+- Forked processes are detached (no zombie, survives parent exit)
+
 ### Test Infrastructure
 
 - Framework: pytest
 - Run command: `uv run --with pytest --with duckdb pytest tests/ -v`
 - Test location: `tests/`
 - Modified test files: `tests/test_sync.py` (existing tests + R2 enhancement)
-- No new test files needed — most fixes are in UI/query layer not covered by unit tests
+- No new test files needed — hook launcher and skills are integration-tested via smoke test
 
 ### Integration Tests
 
 - Existing full sync integration tests cover R2 (scored_commits)
 - R4 requires manual verification (embed.py + vsearch.py interaction)
 - R5 requires manual verification (vsearch.py with --days flag)
+- R1 requires manual verification (hook-launcher.py spawns processes correctly)
 
 ## Implementation Plan
 
@@ -201,56 +257,97 @@ None — all rework items have clear implementations.
     - Files: `static/index.html`
     - Changes: Add `if (!r.ok)` check in `fetchJSON()` before calling `r.json()`
 
-### Phase 3: Hook architecture fix
+### Phase 3: Hook architecture (R1)
 
-9. **Remove `&` from sync.py hook, restructure dashboard startup (R1)**
-    - Files: `hooks/hooks.json`, `scripts/sync.py`
-    - Changes:
-      - `hooks/hooks.json`: Remove both hook entries. Replace with single sync.py hook (no `&`, timeout 30000ms)
-      - `scripts/sync.py`: After sync completes in `main()`, spawn `dashboard.py` in background via `subprocess.Popen` if port 3141 is not in use (import socket, check port, Popen with stdout/stderr redirected to /dev/null)
+9. **Create hook-launcher.py**
+    - Files: `scripts/hook-launcher.py` (NEW)
+    - Changes: ~25-line script. Finds `sync.py` and `dashboard.py` relative to `__file__`. Spawns each as a fully detached process via `subprocess.Popen`. Cross-platform: `start_new_session=True` on POSIX, `creationflags=DETACHED_PROCESS` on Windows. Checks port 3141 before spawning dashboard. All child stdio redirected to `DEVNULL`. Exits 0 immediately.
+    - PEP 723 header: `requires-python = ">=3.11"`, no external dependencies (stdlib only: `subprocess`, `socket`, `sys`)
 
-### Phase 4: Documentation & lint cleanup
+10. **Update hooks.json**
+    - Files: `hooks/hooks.json`
+    - Changes: Replace two backgrounded hook entries with single launcher:
+      ```json
+      {
+        "version": 1,
+        "hooks": {
+          "sessionStart": [{
+            "matcher": ".*",
+            "hooks": [{
+              "type": "command",
+              "command": "uv run --script ${CURSOR_PLUGIN_ROOT}/scripts/hook-launcher.py",
+              "timeout": 10000
+            }]
+          }]
+        }
+      }
+      ```
 
-10. **Fix off-by-one bucket label (R10)**
-    - Files: `skills/report/SKILL.md`
-    - Changes: `'long (30+ msgs)'` → `'long (31+ msgs)'`
+### Phase 4: Skill namespace rename (R13) + initialize skill (R14)
 
-11. **Add language tags to code fences (R11)**
-    - Files: `skills/report/SKILL.md`, `skills/wrapped/SKILL.md`, `skills/query/SKILL.md`
-    - Changes: Add `text` to bare ``` fences for schema reference blocks
+11. **Rename skill directories and update frontmatter**
+    - Delete old dirs, create new dirs with renamed SKILL.md files:
+      - `skills/query/` → `skills/cw-query/` (name: `cw:query`)
+      - `skills/recall/` → `skills/cw-recall/` (name: `cw:recall`)
+      - `skills/report/` → `skills/cw-report/` (name: `cw:report`)
+      - `skills/wrapped/` → `skills/cw-wrapped/` (name: `cw:wrapped`)
+    - Update frontmatter `name:` field in each SKILL.md
+    - Apply R10 (off-by-one label), R11 (language tags) during the rename
 
-12. **Prefix unused test variables (R12)**
+12. **Create `cw:initialize` skill**
+    - Files: `skills/cw-initialize/SKILL.md` (NEW)
+    - Content: First-time setup skill that guides the agent to:
+      1. Run `${CURSOR_PLUGIN_ROOT}/scripts/sync.py --full --verbose` for initial data import
+      2. Report sync results (sessions, messages, tool calls, scored commits)
+      3. Optionally run `${CURSOR_PLUGIN_ROOT}/scripts/embed.py --verbose` for semantic search
+      4. Optionally run `${CURSOR_PLUGIN_ROOT}/scripts/dashboard.py &` to start the dashboard
+      5. Confirm the warehouse is ready
+
+13. **Update cross-references**
+    - Files: `README.md`, `.cursor-plugin/plugin.json`
+    - Changes: Update any skill name references in README (if present). Verify plugin.json `"skills": "./skills/"` still discovers the renamed directories (it should — it scans `*/SKILL.md` recursively).
+
+### Phase 5: Code hygiene
+
+14. **Prefix unused test variables (R12)**
     - Files: `tests/test_sync.py`
     - Changes: `sid` → `_sid` (lines 119, 203), `subagents` → `_subagents` (line 314)
 
-### Phase 5: Verification
+### Phase 6: Verification
 
-13. **Run full test suite**
+15. **Run full test suite**
     - `uv run --with pytest --with duckdb pytest tests/ -v`
     - All 53+ tests must pass
 
-14. **Manual smoke tests**
+16. **Manual smoke tests**
     - `uv run --script scripts/sync.py -v` — verify error logging on any malformed files
+    - `uv run --script scripts/hook-launcher.py` — verify exits immediately, spawns detached processes
     - Verify vsearch.py with `--days` flag doesn't crash (R5)
+    - Verify skills are discoverable with `cw:` prefix
 
 ## Technology Validation
 
-No new technology — all fixes use existing dependencies and patterns.
+No new external technology. `hook-launcher.py` uses only Python stdlib (`subprocess`, `socket`, `sys`). The `start_new_session` parameter and `DETACHED_PROCESS` creation flag are stable, documented Python APIs.
 
 ## Challenges & Mitigations
 
-- **R4 (embed source_id) breaks existing embeddings**: Existing embeddings in the DB have double-prefixed source_ids. `clean_stale_embeddings()` will detect them as stale (no matching message) and clean them on next `embed.py` run. New embeddings will use correct single-prefix IDs. No migration needed — the stale cleanup mechanism handles it. Document in commit message.
-- **R1 (dashboard spawn from sync)**: The subprocess.Popen in sync.py must be fire-and-forget (no wait). Must handle case where sync.py is run manually without dashboard.py available. Use try/except around the Popen.
+- **R4 (embed source_id) breaks existing embeddings**: Existing embeddings in the DB have double-prefixed source_ids. `clean_stale_embeddings()` will detect them as stale (no matching message) and clean them on next `embed.py` run. New embeddings will use correct single-prefix IDs. No migration needed — the stale cleanup mechanism handles it.
+- **R1 (hook launcher cross-platform)**: `start_new_session=True` works on POSIX (Linux, macOS, WSL). Windows requires `creationflags=DETACHED_PROCESS`. The launcher checks `sys.platform` to choose the right approach. Both are well-documented Python stdlib features.
+- **R1 (uv availability for launcher)**: The launcher is invoked via `uv run --script`, which means uv must be installed. This is already a prerequisite for the entire plugin (documented in README). If uv is missing, the hook fails gracefully (Cursor logs the error but continues).
 - **R9 (STRING_AGG model)**: Changing from `MAX(model)` to `STRING_AGG(DISTINCT model, ', ')` may produce longer strings for multi-model sessions. The dashboard and CLI already truncate model display, so this is safe.
+- **R13 (skill rename)**: Users who bookmarked or memorized old skill names will need to use `cw:` prefix. This is pre-v1.0 software with no existing marketplace users, so breaking the old names is fine.
+- **R14 (initialize skill)**: The skill runs sync interactively, which could take 30+ seconds for large histories. The skill document should set expectations about wait time and provide progress indicators via `--verbose`.
 
 ## Status
 
-- [x] PR feedback triage complete (12 valid, 8 rejected)
+- [x] PR feedback triage complete (14 valid, 8 rejected)
+- [x] Hook architecture investigation complete (fork-and-return chosen)
+- [x] Skill namespace decision complete (`cw:` prefix)
 - [x] Component analysis complete
 - [x] Open questions resolved (none)
 - [x] Test planning complete (TDD)
-- [x] Implementation plan complete (14 steps across 5 phases)
-- [x] Technology validation complete (no new tech)
+- [x] Implementation plan complete (16 steps across 6 phases)
+- [x] Technology validation complete (stdlib only)
 - [ ] Preflight
 - [ ] Build
 - [ ] QA
