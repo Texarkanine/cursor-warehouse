@@ -1,11 +1,15 @@
 # Tech Context
 
-Greenfield project — no dependencies, build tools, or tech stack established yet. This file will be populated as the system takes shape.
+Python-based analytics pipeline using standalone PEP 723 scripts. No package installation or pyproject.toml — each script self-declares dependencies.
+
+## Environment Setup
+
+Requires [uv](https://docs.astral.sh/uv/) (the Python package runner). No other global tools needed — `uv run --script` handles dependency resolution per-script.
 
 ## Build Tools
 
-None yet.
+No build step. Scripts run directly via `uv run --script scripts/<name>.py`.
 
 ## Testing Process
 
-None yet.
+Tests run with pytest via `uv run --with pytest --with duckdb pytest tests/ -v`. Test infrastructure is in `tests/conftest.py` (shared DuckDB fixtures, sys.path setup). Fixtures are in `tests/fixtures/` (sample JSONL files, tracking DB).

@@ -6,26 +6,24 @@ cursor-warehouse VISIONA port
 
 ## Phase
 
-PLAN REVISION - COMPLETE
+BUILD - COMPLETE
 
 ## What Was Done
 
-- Deep investigation of Cursor's on-disk data sources (218 JSONL files, 86 SQLite chat stores, tracking DB)
-- Discovered `ai-code-tracking.db` — SQLite database with per-code-change model info, timestamps, and commit-level AI attribution
-- Confirmed `conversationId` in tracking DB maps 100% to `agent-transcripts/` session UUIDs
-- Confirmed `chats/` SQLite stores are a dead format (Jan–Feb 2026 only)
-- Confirmed this very session is a parent session in `agent-transcripts/` (not subagent-only)
-- 7 distinct models found: claude-4.6-opus-high-thinking, composer-2-fast, default, claude-4.6-sonnet-medium-thinking, gpt-5.3-codex, grok-4-20-thinking, gpt-5.4-medium
-- Plan revised: +5 implementation steps (Phase 2b), new `scored_commits` table, `messages.model` populated via tracking DB join
-- Total implementation steps: 28 (was 23)
+- **Phase 1**: Created `.gitignore`, `scripts/schema.sql` (6 tables, `harness` column on 5), test infrastructure (`conftest.py`, `test_schema.py`) — 9 tests passing
+- **Phase 2**: Created 5 test fixtures, 28 sync tests (`test_sync.py`), implemented `scripts/sync.py` with Cursor JSONL parser, discovery, watermark system — all passing
+- **Phase 2b**: Added 6 tracking DB integration tests, implemented `sync_tracking_db()`, `_sync_model_from_tracking()`, `_sync_scored_commits()` — all passing
+- **Phase 3**: Created `scripts/query.py` (8 subcommands, `hooks` removed, prog=`cursor-warehouse`), `scripts/dashboard.py` (model distribution, sessions-by-project, AI attribution endpoint), `static/index.html` (rebranded, cost→sessions)
+- **Phase 4**: Created `scripts/embed.py` (removed research pipeline), `scripts/vsearch.py` (removed research type)
+- **Phase 5**: Created `.cursor-plugin/plugin.json`, `hooks/hooks.json`, 4 skills (query, recall, report, wrapped), `LICENSE`, `README.md`
+- **Phase 6**: Global reference verification clean, 43 tests all passing, smoke test against real data (220 sessions, 7627 messages, 1641 tool calls)
 
-## Decisions
+## Deviations from Plan
 
-- `chats/` stores NOT targeted — dead format, complex Merkle tree/protobuf, only 86 historical sessions
-- `ai-code-tracking.db` IS targeted — provides model, timestamps, and scored_commits
-- `ai_deleted_files` and `conversation_summaries` NOT targeted — marginal value
-- Model info will be partial (code-producing turns only); acceptable trade-off
+- Fixed ambiguous column reference in `query.py` `cmd_sessions` discovered during smoke test (minor, not a plan deficiency)
+- `_sync_model_from_tracking` and `_sync_scored_commits` needed `sqlite3.DatabaseError` in addition to `sqlite3.OperationalError` for corrupt DB handling (discovered during TDD)
+- Tracking DB not found during WSL smoke test (expected — `ai-code-tracking.db` path resolution would need WSL-to-Windows mapping for `/mnt/c/Users/...` paths)
 
 ## Next Step
 
-Awaiting operator to invoke `/niko-build` to begin implementation.
+QA review will now run automatically.

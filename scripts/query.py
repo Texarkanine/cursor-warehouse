@@ -60,19 +60,19 @@ def cmd_sessions(con: duckdb.DuckDBPyConnection, args):
     limit = args.limit or 20
     rows = con.execute(f"""
         SELECT
-            strftime(created_at, '%m-%d %H:%M') as started,
-            project_name,
-            message_count as msgs,
+            strftime(s.created_at, '%m-%d %H:%M') as started,
+            s.project_name,
+            s.message_count as msgs,
             model_info.model as model,
-            COALESCE(LEFT(first_prompt, 80), '') as prompt,
-            session_id
+            COALESCE(LEFT(s.first_prompt, 80), '') as prompt,
+            s.session_id
         FROM sessions s
         LEFT JOIN (
             SELECT session_id, MAX(model) as model
             FROM messages WHERE model IS NOT NULL
             GROUP BY session_id
         ) model_info ON s.session_id = model_info.session_id
-        ORDER BY created_at DESC
+        ORDER BY s.created_at DESC
         LIMIT {limit}
     """).fetchall()
     print(f"Recent sessions (last {limit})\n")
