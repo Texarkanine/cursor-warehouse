@@ -13,10 +13,12 @@ Run ALL of the following queries and synthesize the results into a clear, action
 
 `CURSOR_PLUGIN_ROOT` should be set when invoked through the plugin system, but may be unset during development. Resolve once per session:
 
+Use `find -L` so a symlinked dev install (e.g. `~/.cursor/plugins/local/cursor-warehouse` → your clone) is traversed; plain `find` skips symlinked directories and returns nothing.
+
 ```bash
 QUERY_SCRIPT="${CURSOR_PLUGIN_ROOT:+$CURSOR_PLUGIN_ROOT/scripts/query.py}"
 if [ -z "$QUERY_SCRIPT" ] || [ ! -f "$QUERY_SCRIPT" ]; then
-  QUERY_SCRIPT="$(find ~/.cursor/plugins -name query.py -path '*/cursor-warehouse/*/query.py' 2>/dev/null | head -1)"
+  QUERY_SCRIPT="$(find -L ~/.cursor/plugins -name query.py -path '*/cursor-warehouse/*/query.py' 2>/dev/null | head -1)"
 fi
 ```
 

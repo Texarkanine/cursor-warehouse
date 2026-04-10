@@ -18,10 +18,12 @@ Search across all past Cursor agent sessions stored in the local DuckDB warehous
 
 `CURSOR_PLUGIN_ROOT` should be set when invoked through the plugin system, but may be unset during development. Resolve once per session:
 
+Use `find -L` so symlinked dev installs (e.g. `local/cursor-warehouse` → your clone) are traversed.
+
 ```bash
 PLUGIN_SCRIPTS="${CURSOR_PLUGIN_ROOT:+$CURSOR_PLUGIN_ROOT/scripts}"
 if [ -z "$PLUGIN_SCRIPTS" ] || [ ! -d "$PLUGIN_SCRIPTS" ]; then
-  PLUGIN_SCRIPTS="$(dirname "$(find ~/.cursor/plugins -name query.py -path '*/cursor-warehouse/*/query.py' 2>/dev/null | head -1)")"
+  PLUGIN_SCRIPTS="$(dirname "$(find -L ~/.cursor/plugins -name query.py -path '*/cursor-warehouse/*/query.py' 2>/dev/null | head -1)")"
 fi
 ```
 

@@ -11,10 +11,12 @@ Run arbitrary SQL against the local DuckDB warehouse containing all Cursor agent
 
 `CURSOR_PLUGIN_ROOT` should be set when invoked through the plugin system, but may be unset during development. Resolve once per session:
 
+Use `find -L` so symlinked dev installs (e.g. `local/cursor-warehouse` → your clone) are traversed.
+
 ```bash
 QUERY_SCRIPT="${CURSOR_PLUGIN_ROOT:+$CURSOR_PLUGIN_ROOT/scripts/query.py}"
 if [ -z "$QUERY_SCRIPT" ] || [ ! -f "$QUERY_SCRIPT" ]; then
-  QUERY_SCRIPT="$(find ~/.cursor/plugins -name query.py -path '*/cursor-warehouse/*/query.py' 2>/dev/null | head -1)"
+  QUERY_SCRIPT="$(find -L ~/.cursor/plugins -name query.py -path '*/cursor-warehouse/*/query.py' 2>/dev/null | head -1)"
 fi
 ```
 
@@ -146,14 +148,20 @@ WHERE s.is_subagent = false
 ORDER BY s.created_at DESC LIMIT 10
 ```
 
-Frustration signals (user corrections/pushback):
+Frustration signals (user corrections / venting): same word-boundary regex as **Claude Code** uses. Match case-insensitively with DuckDB `regexp_matches(column, pattern, 'i')` (or prefix the pattern with `(?i)`).
+
 ```sql
-SELECT s.session_id, s.project_name, COUNT(*) frustration_msgs
+-- Frustration: Claude Code regex only
+SELECT s.session_id, s.project_name, COUNT(*) AS frustration_msgs
 FROM messages m
 JOIN sessions s ON m.session_id = s.session_id
 WHERE m.role = 'user'
-  AND (m.text_content ILIKE '%no dice%' OR m.text_content ILIKE '%not even close%'
-       OR m.text_content ILIKE '%did NOT fix%' OR m.text_content ILIKE '%ARGH%'
-       OR m.text_content ILIKE '%that is wrong%' OR m.text_content ILIKE '%still broken%')
-GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 10
+  AND regexp_matches(
+    m.text_content,
+    '\b(wtf|wth|ffs|shit(ty)?|dumbass|horrible|awful|piss(ed|ing)? off|piece of (shit|crap)|what the (fuck|hell)|fucking? (broken|useless|terrible)|fuck you|screw (this|you)|so frustrating|this sucks|damn it)\b',
+    'i'
+  )
+GROUP BY 1, 2
+ORDER BY 3 DESC
+LIMIT 10
 ```

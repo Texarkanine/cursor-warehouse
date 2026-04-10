@@ -11,10 +11,12 @@ Run this skill after installing cursor-warehouse for the first time. It performs
 
 `CURSOR_PLUGIN_ROOT` should be set when invoked through the plugin system, but may be unset during development. Resolve once per session:
 
+Use `find -L` so a symlinked dev install (e.g. `~/.cursor/plugins/local/cursor-warehouse` → your clone) is traversed.
+
 ```bash
 PLUGIN_SCRIPTS="${CURSOR_PLUGIN_ROOT:+$CURSOR_PLUGIN_ROOT/scripts}"
 if [ -z "$PLUGIN_SCRIPTS" ] || [ ! -d "$PLUGIN_SCRIPTS" ]; then
-  PLUGIN_SCRIPTS="$(dirname "$(find ~/.cursor/plugins -name sync.py -path '*/cursor-warehouse/*/sync.py' 2>/dev/null | head -1)")"
+  PLUGIN_SCRIPTS="$(dirname "$(find -L ~/.cursor/plugins -name sync.py -path '*/cursor-warehouse/*/sync.py' 2>/dev/null | head -1)")"
 fi
 ```
 
