@@ -86,11 +86,24 @@ def _derive_project_name(workspace_slug: str) -> str:
 
     Workspace slugs encode paths with hyphens, e.g.
     'home-mobaxterm-Documents-git-myproject' -> 'myproject'
-    We take the last segment as the project name.
+
+    Cursor ephemeral workspaces have slugs like:
+    's-Users-Austin-AppData-Roaming-Cursor-Workspaces-1764355524551-workspace-json'
+    For these, we extract the timestamp to produce 'workspace-1764355524551'.
     """
     if not workspace_slug:
         return ""
     parts = workspace_slug.split("-")
+
+    # Detect Cursor ephemeral workspace slugs: contain "Workspaces" segment
+    # followed by a numeric timestamp, then "workspace", then "json"
+    try:
+        ws_idx = parts.index("Workspaces")
+        if (ws_idx + 1 < len(parts) and parts[ws_idx + 1].isdigit()):
+            return f"workspace-{parts[ws_idx + 1]}"
+    except ValueError:
+        pass
+
     return parts[-1] if parts else workspace_slug
 
 
@@ -322,14 +335,34 @@ def sync_all(con: duckdb.DuckDBPyConnection, projects_dir: Path, verbose: bool =
 # Tracking DB Integration (ai-code-tracking.db)
 # ---------------------------------------------------------------------------
 
+def _wsl_mnt_root() -> Path:
+    """Return the WSL mount root for Windows drives (typically /mnt/)."""
+    return Path("/mnt")
+
+
 def _find_tracking_db() -> Path | None:
-    """Discover ai-code-tracking.db from known locations."""
-    candidates = [
-        CURSOR_DIR / "ai-tracking" / "ai-code-tracking.db",
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
+    """Discover ai-code-tracking.db from known locations.
+
+    Searches the native ~/.cursor/ path first, then falls back to WSL
+    Windows mount paths (/mnt/<drive>/Users/<user>/.cursor/ai-tracking/).
+    """
+    native = CURSOR_DIR / "ai-tracking" / "ai-code-tracking.db"
+    if native.exists():
+        return native
+
+    # WSL fallback: search /mnt/<drive>/Users/*/.cursor/ai-tracking/
+    mnt = _wsl_mnt_root()
+    if mnt.is_dir():
+        for drive in mnt.iterdir():
+            if not drive.is_dir() or len(drive.name) != 1:
+                continue
+            users_dir = drive / "Users"
+            if not users_dir.is_dir():
+                continue
+            for user_dir in users_dir.iterdir():
+                candidate = user_dir / ".cursor" / "ai-tracking" / "ai-code-tracking.db"
+                if candidate.exists():
+                    return candidate
     return None
 
 
@@ -385,6 +418,37 @@ def _sync_model_from_tracking(con: duckdb.DuckDBPyConnection, tracking_con, verb
         print(f"  Model enrichment: {len(rows)} conversation-model pairs from tracking DB")
 
 
+def _parse_tracking_timestamp(val) -> str | None:
+    """Convert a tracking DB timestamp to ISO 8601 for DuckDB.
+
+    Handles epoch milliseconds (BIGINT), git date strings
+    ('Fri Feb 20 09:59:00 2026 -0600'), and ISO strings.
+    Returns None for empty/unparseable values.
+    """
+    if val is None or val == "":
+        return None
+    # Epoch milliseconds (BIGINT)
+    if isinstance(val, (int, float)):
+        try:
+            return datetime.fromtimestamp(val / 1000, tz=timezone.utc).isoformat()
+        except (ValueError, OSError):
+            return None
+    val = str(val)
+    # Try epoch string
+    if val.isdigit():
+        try:
+            return datetime.fromtimestamp(int(val) / 1000, tz=timezone.utc).isoformat()
+        except (ValueError, OSError):
+            return None
+    # Git date format: 'Fri Feb 20 09:59:00 2026 -0600'
+    from email.utils import parsedate_to_datetime
+    try:
+        return parsedate_to_datetime(val).isoformat()
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
 def _sync_scored_commits(con: duckdb.DuckDBPyConnection, tracking_con, verbose: bool = False):
     """Import scored_commits from tracking DB with camelCase to snake_case mapping."""
     try:
@@ -404,6 +468,9 @@ def _sync_scored_commits(con: duckdb.DuckDBPyConnection, tracking_con, verbose: 
         return
 
     for row in rows:
+        scored_at = _parse_tracking_timestamp(row[2])
+        commit_date = _parse_tracking_timestamp(row[14])
+
         con.execute("""
             INSERT INTO scored_commits VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT (commit_hash, branch_name) DO UPDATE SET
@@ -411,10 +478,10 @@ def _sync_scored_commits(con: duckdb.DuckDBPyConnection, tracking_con, verbose: 
                 lines_added = excluded.lines_added,
                 lines_deleted = excluded.lines_deleted
         """, [
-            row[0], row[1], "cursor", row[2],
+            row[0], row[1], "cursor", scored_at,
             row[3], row[4], row[5], row[6], row[7], row[8],
-            row[9], row[10], row[11], row[12], row[13], row[14],
-            row[15], row[16],
+            row[9], row[10], row[11], row[12], row[13],
+            commit_date, row[15], row[16],
         ])
 
     if verbose:

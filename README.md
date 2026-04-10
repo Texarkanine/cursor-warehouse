@@ -58,9 +58,51 @@ All provenance tables include a `harness` column (defaults to `'cursor'`) for fu
 | `embeddings` | Vector embeddings for semantic search |
 | `_sync_state` | Watermarks for incremental sync |
 
-## Skills
+## Installation
 
-Install as a Cursor plugin to get agent skills:
+### From GitHub (main branch)
+
+In Cursor, go to **Settings > Plugins**, paste the repo URL into "Search or Paste Link":
+
+```
+https://github.com/Texarkanine/cursor-warehouse
+```
+
+Cursor installs from the default branch. Skills and hooks activate automatically.
+
+### Local / branch testing
+
+Cursor's GitHub installer only pulls the default branch. To test an unmerged branch locally, symlink the repo into Cursor's local plugin directory and register it via the shared config surface:
+
+```bash
+# 1. Symlink your working tree
+ln -sfn /path/to/cursor-warehouse ~/.cursor/plugins/local/cursor-warehouse
+
+# 2. Register the plugin (upsert into existing file — don't clobber other entries)
+python3 -c "
+import json, pathlib, sys
+p = pathlib.Path.home() / '.claude/plugins/installed_plugins.json'
+data = json.loads(p.read_text()) if p.exists() else {'version': 2, 'plugins': {}}
+data['plugins']['cursor-warehouse@local'] = [{'scope': 'user', 'installPath': str(pathlib.Path.home() / '.cursor/plugins/local/cursor-warehouse')}]
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(data, indent=2))
+"
+
+# 3. Enable the plugin
+python3 -c "
+import json, pathlib
+p = pathlib.Path.home() / '.claude/settings.json'
+data = json.loads(p.read_text()) if p.exists() else {}
+data.setdefault('enabledPlugins', {})['cursor-warehouse@local'] = True
+p.write_text(json.dumps(data, indent=2))
+"
+
+# 4. Restart Cursor
+```
+
+To uninstall the local override, remove the entries from both JSON files, delete the symlink, and restart Cursor.
+
+## Skills
 
 | Skill | Description |
 |-------|-------------|
@@ -71,7 +113,7 @@ Install as a Cursor plugin to get agent skills:
 
 ## Hooks
 
-For automatic sync on session start, copy `hooks/hooks.json` to `.cursor/hooks.json` in your workspace, or install as a Cursor plugin.
+The plugin runs `sync.py` and starts the dashboard automatically on session start. For manual hook setup without the plugin, copy `hooks/hooks.json` to `.cursor/hooks.json` in your workspace.
 
 ## Running tests
 

@@ -644,3 +644,135 @@ class TestTrackingDbIntegration:
         # Should not crash
         sync.sync_tracking_db(con, tracking_db_path=bad_db, verbose=True)
         con.close()
+
+
+# ---------------------------------------------------------------------------
+# WSL Tracking DB Discovery Tests
+# ---------------------------------------------------------------------------
+
+class TestFindTrackingDb:
+    """Tests for _find_tracking_db — portable discovery across native and WSL paths."""
+
+    def test_finds_native_path(self, tmp_path, monkeypatch):
+        """Finds tracking DB at ~/.cursor/ai-tracking/ (native Linux/macOS)."""
+        import sync
+
+        cursor_dir = tmp_path / ".cursor"
+        tracking_dir = cursor_dir / "ai-tracking"
+        tracking_dir.mkdir(parents=True)
+        db_file = tracking_dir / "ai-code-tracking.db"
+        db_file.write_text("fake")
+
+        monkeypatch.setattr(sync, "CURSOR_DIR", cursor_dir)
+        result = sync._find_tracking_db()
+        assert result is not None
+        assert result == db_file
+
+    def test_finds_wsl_mount_path(self, tmp_path, monkeypatch):
+        """Finds tracking DB under /mnt/<drive>/Users/<user>/.cursor/ai-tracking/."""
+        import sync
+
+        cursor_dir = tmp_path / ".cursor"
+        cursor_dir.mkdir(parents=True)
+        monkeypatch.setattr(sync, "CURSOR_DIR", cursor_dir)
+
+        mnt = tmp_path / "mnt" / "c" / "Users" / "TestUser" / ".cursor" / "ai-tracking"
+        mnt.mkdir(parents=True)
+        db_file = mnt / "ai-code-tracking.db"
+        db_file.write_text("fake")
+
+        monkeypatch.setattr(sync, "_wsl_mnt_root", lambda: tmp_path / "mnt")
+        result = sync._find_tracking_db()
+        assert result is not None
+        assert result == db_file
+
+    def test_native_preferred_over_wsl(self, tmp_path, monkeypatch):
+        """Native path takes precedence when both exist."""
+        import sync
+
+        cursor_dir = tmp_path / ".cursor"
+        native_dir = cursor_dir / "ai-tracking"
+        native_dir.mkdir(parents=True)
+        native_db = native_dir / "ai-code-tracking.db"
+        native_db.write_text("native")
+
+        wsl_dir = tmp_path / "mnt" / "c" / "Users" / "Someone" / ".cursor" / "ai-tracking"
+        wsl_dir.mkdir(parents=True)
+        wsl_db = wsl_dir / "ai-code-tracking.db"
+        wsl_db.write_text("wsl")
+
+        monkeypatch.setattr(sync, "CURSOR_DIR", cursor_dir)
+        monkeypatch.setattr(sync, "_wsl_mnt_root", lambda: tmp_path / "mnt")
+        result = sync._find_tracking_db()
+        assert result == native_db
+
+    def test_returns_none_when_nothing_found(self, tmp_path, monkeypatch):
+        """Returns None when no tracking DB exists anywhere."""
+        import sync
+
+        cursor_dir = tmp_path / ".cursor"
+        cursor_dir.mkdir(parents=True)
+        monkeypatch.setattr(sync, "CURSOR_DIR", cursor_dir)
+        monkeypatch.setattr(sync, "_wsl_mnt_root", lambda: tmp_path / "mnt")
+        result = sync._find_tracking_db()
+        assert result is None
+
+    def test_finds_across_multiple_wsl_drives(self, tmp_path, monkeypatch):
+        """Searches all drive letters under /mnt/, not just /mnt/c/."""
+        import sync
+
+        cursor_dir = tmp_path / ".cursor"
+        cursor_dir.mkdir(parents=True)
+        monkeypatch.setattr(sync, "CURSOR_DIR", cursor_dir)
+
+        wsl_dir = tmp_path / "mnt" / "s" / "Users" / "Austin" / ".cursor" / "ai-tracking"
+        wsl_dir.mkdir(parents=True)
+        db_file = wsl_dir / "ai-code-tracking.db"
+        db_file.write_text("fake")
+
+        monkeypatch.setattr(sync, "_wsl_mnt_root", lambda: tmp_path / "mnt")
+        result = sync._find_tracking_db()
+        assert result is not None
+        assert result == db_file
+
+
+# ---------------------------------------------------------------------------
+# Project Name Derivation Tests
+# ---------------------------------------------------------------------------
+
+class TestDeriveProjectName:
+    """Tests for _derive_project_name — workspace slug to human-readable name."""
+
+    def test_standard_slug(self):
+        """Standard workspace slug extracts last path segment."""
+        import sync
+        assert sync._derive_project_name("home-mobaxterm-Documents-git-myproject") == "myproject"
+
+    def test_cursor_workspace_slug_uses_timestamp(self):
+        """Cursor ephemeral workspace slugs use the numeric timestamp as the name."""
+        import sync
+        name = sync._derive_project_name(
+            "s-Users-Austin-AppData-Roaming-Cursor-Workspaces-1764355524551-workspace-json"
+        )
+        assert name == "workspace-1764355524551"
+
+    def test_cursor_workspace_slug_different_timestamps(self):
+        """Each ephemeral workspace gets a distinct name from its timestamp."""
+        import sync
+        name1 = sync._derive_project_name(
+            "s-Users-Austin-AppData-Roaming-Cursor-Workspaces-1111111111111-workspace-json"
+        )
+        name2 = sync._derive_project_name(
+            "s-Users-Austin-AppData-Roaming-Cursor-Workspaces-2222222222222-workspace-json"
+        )
+        assert name1 != name2
+        assert "1111111111111" in name1
+        assert "2222222222222" in name2
+
+    def test_empty_slug(self):
+        import sync
+        assert sync._derive_project_name("") == ""
+
+    def test_single_segment(self):
+        import sync
+        assert sync._derive_project_name("myproject") == "myproject"

@@ -270,6 +270,7 @@ Global search-and-replace across all files:
 - Multi-harness support (Claude Code adapter) — that's VISION2
 - Adapter interface / Protocol — that's VISION2
 - Global CLI wrapper mechanism — that's VISION2
+- Release automation (release-please for version bumps, tags, changelogs) — that's VISION2
 
 ## Acceptance Criteria
 
@@ -365,6 +366,17 @@ The matching step (3) needs investigation — it's not yet confirmed whether `co
 - Bubble data is ephemeral — Cursor may prune old entries. The JSONL transcripts remain the authoritative long-term record; `state.vscdb` is a supplementary enrichment source.
 - The `state.vscdb` schema is undocumented and internal to Cursor. It may change without notice across Cursor versions.
 - This approach was discovered by cross-referencing with [cursor-chronicle](https://github.com/mikhailsal/cursor-chronicle), which reads exclusively from `state.vscdb` but does not use `ai-code-tracking.db` or agent transcripts.
+
+## Future: Release Automation
+
+Cursor's marketplace tracks the **default branch** and re-indexes on push via GitHub webhooks. It does not support tag-based refs or pinning to a specific version. The `version` field in `plugin.json` is the marketplace's version — consumers always get whatever's on main.
+
+For versioning discipline without fighting the marketplace model, use [release-please](https://github.com/googleapis/release-please) on main:
+- Automates version bumps in `plugin.json` (via a custom `release-please-config.json` targeting `.cursor-plugin/plugin.json`)
+- Creates git tags and GitHub Releases for changelog/audit purposes
+- The marketplace picks up whatever lands on main regardless — tags are for our own record
+
+This is a VISION2 concern. For VISIONA, `plugin.json` version is manually set to `0.1.0`.
 
 ## Attribution
 

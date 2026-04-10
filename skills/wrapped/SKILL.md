@@ -1,4 +1,5 @@
 ---
+name: wrapped
 description: Generate a fun, shareable summary of your Cursor agent usage stats — like Spotify Wrapped but for AI-assisted development. Use when the user asks for their stats, summary, wrapped, or wants a fun overview of their Cursor activity.
 ---
 

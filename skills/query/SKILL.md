@@ -1,4 +1,5 @@
 ---
+name: query
 description: Run raw SQL queries against the Cursor agent session DuckDB warehouse. Use when you need precise, structured lookups across sessions, messages, tool calls, scored commits, or embeddings that go beyond simple text search.
 ---
 

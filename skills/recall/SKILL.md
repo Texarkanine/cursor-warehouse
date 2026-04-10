@@ -1,4 +1,5 @@
 ---
+name: recall
 description: Search across all past Cursor agent sessions. Use when you need to recall previous work, find solutions to problems you've solved before, or retrieve context from past conversations. Powered by DuckDB keyword search and semantic vector search over session history.
 ---
 

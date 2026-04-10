@@ -1,4 +1,5 @@
 ---
+name: report
 description: Generate an analytics report on your AI-assisted development habits. Use when the user asks about their productivity, workflow patterns, session efficiency, or wants to understand how they use Cursor. Covers model usage, tool patterns, session shapes, project maturity, AI attribution, and actionable improvement suggestions.
 ---
 
