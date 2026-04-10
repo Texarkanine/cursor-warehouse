@@ -501,7 +501,11 @@ def main():
     args = parser.parse_args()
 
     t0 = time.time()
-    con = duckdb.connect(args.db)
+    try:
+        con = duckdb.connect(args.db)
+    except duckdb.IOException:
+        # Another sync instance holds the database lock — exit silently
+        return
     init_db(con)
 
     if args.full:

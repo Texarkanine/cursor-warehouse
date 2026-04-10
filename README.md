@@ -20,6 +20,12 @@ Developer analytics for AI-assisted coding in Cursor. Syncs your agent session d
 | Agent transcripts | `~/.cursor/projects/*/agent-transcripts/**/*.jsonl` | Sessions, messages, tool calls |
 | AI tracking DB | `~/.cursor/ai-tracking/ai-code-tracking.db` | Model per request, scored commits (AI %) |
 
+## Platform support
+
+Tested on **Windows 11 + WSL** (Cursor launched from a WSL terminal). The scripts run inside WSL and automatically find Cursor data on both the WSL and Windows sides.
+
+Native Windows and macOS are expected to work (all paths use `~/.cursor/`) but have not been tested. See [issue tracking](https://github.com/Texarkanine/cursor-warehouse/issues) for platform-specific reports.
+
 ## Quick start
 
 Requires [uv](https://docs.astral.sh/uv/) (Python package runner).
