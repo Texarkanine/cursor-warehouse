@@ -26,4 +26,4 @@ BUILD - COMPLETE
 
 ## Next Step
 
-QA review will now run automatically.
+QA PASSED — proceed to `/niko-reflect`.

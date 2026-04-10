@@ -1,7 +1,6 @@
 """Tests for cursor-warehouse sync engine (JSONL parser, discovery, full flow)."""
 
 import json
-import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -23,7 +22,7 @@ def _make_session_dir(base: Path, workspace_slug: str, session_id: str) -> Path:
     return d
 
 
-def _make_subagent_dir(base: Path, workspace_slug: str, parent_id: str, subagent_id: str) -> Path:
+def _make_subagent_dir(base: Path, workspace_slug: str, parent_id: str) -> Path:
     """Create a subagent directory under a parent session."""
     d = base / workspace_slug / "agent-transcripts" / parent_id / "subagents"
     d.mkdir(parents=True, exist_ok=True)
@@ -298,7 +297,7 @@ class TestDiscovery:
         projects_dir = tmp_path / "projects"
         session_dir = _make_session_dir(projects_dir, "my-workspace", "session-bbb")
         _copy_fixture("cursor_session.jsonl", session_dir, "session-bbb.jsonl")
-        sub_dir = _make_subagent_dir(projects_dir, "my-workspace", "session-bbb", "sub-001")
+        sub_dir = _make_subagent_dir(projects_dir, "my-workspace", "session-bbb")
         _copy_fixture("cursor_subagent.jsonl", sub_dir, "sub-001.jsonl")
 
         sessions, subagents = sync._scan_jsonl_files(projects_dir, 0.0, 0.0)

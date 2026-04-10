@@ -7,7 +7,9 @@
 
 import argparse
 import json
+import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
@@ -174,7 +176,6 @@ def _ingest_jsonl(con: duckdb.DuckDBPyConnection, fp: Path, session_id: str,
         return None
 
     file_mtime = fp.stat().st_mtime
-    from datetime import datetime, timezone
     file_ts = datetime.fromtimestamp(file_mtime, tz=timezone.utc)
 
     # Derive project info from path structure
@@ -345,8 +346,6 @@ def sync_tracking_db(con: duckdb.DuckDBPyConnection, tracking_db_path: Path | No
             print("  Tracking DB not found — skipping model enrichment and scored_commits")
         return
 
-    import sqlite3
-
     try:
         tracking_con = sqlite3.connect(f"file:{tracking_db_path}?immutable=1", uri=True)
     except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
@@ -363,8 +362,6 @@ def sync_tracking_db(con: duckdb.DuckDBPyConnection, tracking_db_path: Path | No
 
 def _sync_model_from_tracking(con: duckdb.DuckDBPyConnection, tracking_con, verbose: bool = False):
     """Populate messages.model via ai_code_hashes join on conversationId."""
-    import sqlite3
-
     try:
         rows = tracking_con.execute(
             "SELECT DISTINCT conversationId, model FROM ai_code_hashes "
@@ -378,13 +375,11 @@ def _sync_model_from_tracking(con: duckdb.DuckDBPyConnection, tracking_con, verb
     if not rows:
         return
 
-    updated = 0
     for conversation_id, model in rows:
-        result = con.execute(
+        con.execute(
             "UPDATE messages SET model = ? WHERE session_id = ? AND model IS NULL",
             [model, conversation_id],
         )
-        updated += result.fetchone()[0] if result.description else 0
 
     if verbose:
         print(f"  Model enrichment: {len(rows)} conversation-model pairs from tracking DB")
@@ -392,8 +387,6 @@ def _sync_model_from_tracking(con: duckdb.DuckDBPyConnection, tracking_con, verb
 
 def _sync_scored_commits(con: duckdb.DuckDBPyConnection, tracking_con, verbose: bool = False):
     """Import scored_commits from tracking DB with camelCase to snake_case mapping."""
-    import sqlite3
-
     try:
         rows = tracking_con.execute(
             "SELECT commitHash, branchName, scoredAt, linesAdded, linesDeleted, "

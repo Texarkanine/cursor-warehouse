@@ -483,4 +483,4 @@ Validation: The upstream already validates these dependencies work with PEP 723.
 - [x] Preflight (PASS — hooks location corrected)
 - [x] Plan revision: `ai-code-tracking.db` integration (model, scored_commits)
 - [x] Build (28/28 steps complete, 43 tests passing, smoke test verified)
-- [ ] QA
+- [x] QA (PASS — 5 trivial fixes applied, 0 blocking issues)
