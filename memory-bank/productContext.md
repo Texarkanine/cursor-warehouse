@@ -24,5 +24,6 @@ Cursor IDE users and developers who want analytics and searchability over their 
 
 ## Key Constraints
 
-- Greenfield project — no existing code or users yet
+- Direct port of claude-warehouse (MIT) — architecture inherited, not designed
+- No per-message token counts from Cursor (cost features unavailable)
 - MIT-licensed

@@ -6,7 +6,7 @@ cursor-warehouse VISIONA port
 
 ## Phase
 
-BUILD - COMPLETE
+REFLECT - COMPLETE
 
 ## What Was Done
 
@@ -26,4 +26,4 @@ BUILD - COMPLETE
 
 ## Next Step
 
-QA PASSED — proceed to `/niko-reflect`.
+Run `/niko-archive` to create the archive document and finalize the current project.
