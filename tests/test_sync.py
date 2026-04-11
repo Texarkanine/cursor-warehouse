@@ -809,19 +809,22 @@ class TestTrackingDbIntegration:
         assert count == 0
         con.close()
 
-    def test_locked_tracking_db_graceful_skip(self, tmp_path):
-        """Locked tracking DB is handled gracefully (no crash)."""
+    def test_corrupt_tracking_db_graceful_skip(self, tmp_path):
+        """Corrupt/unreadable tracking DB is handled gracefully (no crash).
+
+        Note: sync opens the tracking DB with ``immutable=1`` for read-only access, so a
+        SQLite ``BEGIN EXCLUSIVE`` lock from another connection does not block that open.
+        This test covers invalid/corrupt file content, which matches OperationalError/DatabaseError.
+        """
         import sync
 
         db_path = tmp_path / "test.duckdb"
         con = duckdb.connect(str(db_path))
         con.execute(SCHEMA_PATH.read_text())
 
-        # Create an empty file that's not a valid SQLite database
         bad_db = tmp_path / "bad-tracking.db"
         bad_db.write_text("not a database")
 
-        # Should not crash
         sync.sync_tracking_db(con, tracking_db_path=bad_db, verbose=True)
         con.close()
 
@@ -973,6 +976,61 @@ class TestEmbedSourceIdContract:
         """).fetchall()
         assert len(stale) == 1
         assert stale[0][0] == "nonexistent:99"
+
+    def test_clean_stale_embeddings_removes_orphan_message_user_query(self, db):
+        """clean_stale_embeddings deletes message_user_query rows with no matching message."""
+        import embed
+
+        db.execute(
+            "INSERT INTO embeddings VALUES ('message_user_query', 'orphan:uq:1', 0, 'cursor', 'x', NULL)",
+        )
+        removed = embed.clean_stale_embeddings(db, verbose=False)
+        assert removed == 1
+        n = db.execute(
+            "SELECT COUNT(*) FROM embeddings WHERE source_type = 'message_user_query' "
+            "AND source_id = 'orphan:uq:1'",
+        ).fetchone()[0]
+        assert n == 0
+
+    def test_reingest_jsonl_clears_embeddings_for_session(self, db):
+        """Re-ingesting a session removes session/message/message_user_query embeddings first."""
+        import sync
+
+        fp = FIXTURES_DIR / "cursor_session.jsonl"
+        session_id = "reingest-embed-session"
+        sync._ingest_jsonl(db, fp, session_id=session_id)
+
+        db.execute(
+            "INSERT INTO embeddings VALUES ('session', ?, 0, 'cursor', 's', NULL)",
+            [session_id],
+        )
+        msg_uuid = db.execute(
+            "SELECT uuid FROM messages WHERE session_id = ? LIMIT 1",
+            [session_id],
+        ).fetchone()[0]
+        db.execute(
+            "INSERT INTO embeddings VALUES ('message', ?, 0, 'cursor', 'm', NULL)",
+            [msg_uuid],
+        )
+        db.execute(
+            "INSERT INTO embeddings VALUES ('message_user_query', ?, 0, 'cursor', 'uq', NULL)",
+            [msg_uuid],
+        )
+
+        sync._ingest_jsonl(db, fp, session_id=session_id)
+
+        assert db.execute(
+            "SELECT COUNT(*) FROM embeddings WHERE source_type = 'session' AND source_id = ?",
+            [session_id],
+        ).fetchone()[0] == 0
+        assert db.execute(
+            "SELECT COUNT(*) FROM embeddings WHERE source_type = 'message' AND source_id = ?",
+            [msg_uuid],
+        ).fetchone()[0] == 0
+        assert db.execute(
+            "SELECT COUNT(*) FROM embeddings WHERE source_type = 'message_user_query' AND source_id = ?",
+            [msg_uuid],
+        ).fetchone()[0] == 0
 
 
 # ---------------------------------------------------------------------------

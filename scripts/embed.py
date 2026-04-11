@@ -229,10 +229,18 @@ def embed_sessions(con: duckdb.DuckDBPyConnection, model, verbose: bool = False)
 # ---------------------------------------------------------------------------
 
 def clean_stale_embeddings(con: duckdb.DuckDBPyConnection, verbose: bool = False):
-    """Remove embeddings for messages/sessions that were re-synced (deleted+reinserted)."""
+    """Remove embeddings for messages/sessions/user_query rows that no longer exist."""
     stale_msgs = con.execute("""
         SELECT e.source_id FROM embeddings e
         WHERE e.source_type = 'message'
+        AND NOT EXISTS (
+            SELECT 1 FROM messages m WHERE e.source_id = m.uuid
+        )
+    """).fetchall()
+
+    stale_uq = con.execute("""
+        SELECT e.source_id FROM embeddings e
+        WHERE e.source_type = 'message_user_query'
         AND NOT EXISTS (
             SELECT 1 FROM messages m WHERE e.source_id = m.uuid
         )
@@ -251,6 +259,13 @@ def clean_stale_embeddings(con: duckdb.DuckDBPyConnection, verbose: bool = False
         ids = [r[0] for r in stale_msgs]
         con.executemany(
             "DELETE FROM embeddings WHERE source_type = 'message' AND source_id = ?",
+            [(i,) for i in ids],
+        )
+        total += len(ids)
+    if stale_uq:
+        ids = [r[0] for r in stale_uq]
+        con.executemany(
+            "DELETE FROM embeddings WHERE source_type = 'message_user_query' AND source_id = ?",
             [(i,) for i in ids],
         )
         total += len(ids)

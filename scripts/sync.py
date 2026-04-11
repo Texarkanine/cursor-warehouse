@@ -325,7 +325,16 @@ def _ingest_jsonl(con: duckdb.DuckDBPyConnection, fp: Path, session_id: str,
         is_subagent, parent_session_id,
     ])
 
-    # Dedup: delete and reinsert
+    # Dedup: drop embeddings tied to this session (message UUIDs still resolvable), then rows
+    con.execute(
+        "DELETE FROM embeddings WHERE source_type = 'session' AND source_id = ?",
+        [session_id],
+    )
+    con.execute("""
+        DELETE FROM embeddings
+        WHERE source_type IN ('message', 'message_user_query')
+          AND source_id IN (SELECT uuid FROM messages WHERE session_id = ?)
+    """, [session_id])
     con.execute("DELETE FROM messages WHERE session_id = ?", [session_id])
     con.execute("DELETE FROM tool_calls WHERE session_id = ?", [session_id])
 
