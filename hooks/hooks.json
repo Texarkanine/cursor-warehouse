@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script ${CURSOR_PLUGIN_ROOT}/scripts/hook-launcher.py",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
+  }
+}

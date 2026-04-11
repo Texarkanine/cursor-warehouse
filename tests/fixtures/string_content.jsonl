@@ -1,0 +1,2 @@
+{"role":"user","message":{"role":"user","content":"This is a plain string content, not a list of blocks."}}
+{"role":"assistant","message":{"role":"assistant","content":"Plain string assistant response."}}

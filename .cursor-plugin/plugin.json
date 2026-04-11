@@ -1,0 +1,13 @@
+{
+  "name": "cursor-warehouse",
+  "displayName": "Cursor Warehouse",
+  "description": "Developer analytics for AI-assisted coding in Cursor. Sessions captured, searchable, queryable.",
+  "version": "0.1.0",
+  "homepage": "https://github.com/Texarkanine/cursor-warehouse",
+  "repository": "https://github.com/Texarkanine/cursor-warehouse",
+  "license": "MIT",
+  "keywords": ["analytics", "memory", "duckdb", "cursor", "search", "dashboard"],
+  "category": "developer-tools",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}
