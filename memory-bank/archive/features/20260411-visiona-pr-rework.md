@@ -1,0 +1,150 @@
+---
+task_id: visiona-pr-rework
+complexity_level: 3
+date: 2026-04-11
+status: completed
+---
+
+# TASK ARCHIVE: cursor-warehouse Initial Release (VISIONA port + PR #1 rework)
+
+## SUMMARY
+
+Direct port of [claude-warehouse](https://github.com/sderosiaux/claude-warehouse) (MIT) to cursor-warehouse, followed by three rounds of PR review rework. The result is a complete Cursor agent session analytics platform: JSONL sync, DuckDB warehouse, semantic embeddings, CLI query interface, localhost dashboard, and Cursor plugin packaging. 92 tests passing at final verification.
+
+The work spans two logical task IDs on this branch — `visiona-port` (initial build) and `visiona-pr-rework` (PR #1 feedback, Rounds 1–3) — archived together because the entire branch merges to `main` as the first release.
+
+## REQUIREMENTS
+
+From the VISIONA project brief:
+
+- Copy upstream claude-warehouse, rewrite JSONL parser for Cursor agent transcripts
+- Schema: add `harness TEXT NOT NULL DEFAULT 'cursor'` to provenance tables; drop Claude-specific tables
+- Adapt all scripts (sync, query, dashboard, embed) for Cursor data paths and formats
+- Integrate `ai-code-tracking.db` (model enrichment, scored commits) — discovered during planning
+- Plugin packaging: `plugin.json`, hooks (fork-and-return via `hook-launcher.py`), skills (`cw:` namespace)
+- PEP 723 / `uv run --script` pattern preserved throughout
+
+PR rework requirements (24 valid items across 3 rounds):
+
+- **Round 1 (14 items):** Security (SQL params), robustness (fork-and-return hooks, `cw:` skill namespace, error logging), contract tests, hygiene
+- **Round 2 (7 items):** Sync correctness (workspace slug reconstruction, model determinism, UTF-8, ISO timestamps), dashboard date bug, test `tmp_path`, SKILL query script refs
+- **Round 3 (3 items):** Long-text chunk → mean-pooled embeddings, `(mtime, last_path)` watermark tiebreaker, narrow `_ingest_jsonl` exception boundaries
+
+11 items across all rounds were triaged and rejected with documented rationale (duplicates, false positives, premature optimization, intentional design choices).
+
+## IMPLEMENTATION
+
+### Original Port (visiona-port)
+
+28 implementation steps across 6 phases. 18 files created (6 scripts, 1 schema, 1 static, 4 skills, 1 plugin manifest, 1 hooks config, 1 license, 1 readme, 1 gitignore). Key components:
+
+- **`scripts/sync.py`**: Complete JSONL parser rewrite for Cursor transcript format (no per-message UUIDs/timestamps/tokens — synthetic `{session_id}:{line_idx}` UUID scheme). Incremental sync via mtime watermarks. Workspace slug → project name derivation. `ai-code-tracking.db` integration for model enrichment and scored commits.
+- **`scripts/schema.sql`**: DuckDB schema with `harness` column on all provenance tables. `scored_commits` table (Cursor-specific). `_sync_state` for watermark tracking.
+- **`scripts/query.py`**: CLI query interface (`sessions`, `search`, `sql`, `tools`, `models`).
+- **`scripts/embed.py`**: Semantic embeddings via `sentence-transformers` with HNSW index.
+- **`scripts/vsearch.py`**: Vector similarity search with post-filter by project/days.
+- **`scripts/dashboard.py`**: Localhost analytics dashboard with Chart.js frontend.
+- **`scripts/hook-launcher.py`**: Fork-and-return process manager for Cursor SessionStart hooks — spawns sync/embed/dashboard as detached children via `uv run --script`.
+- **`static/index.html`**: Dashboard frontend (sessions by project, daily/weekly activity, model distribution, AI attribution).
+
+### Post-Port Manual QA Rework
+
+Smoke testing the installed plugin revealed 3 environment-specific bugs:
+1. WSL tracking DB path not discovered → added `/mnt/*/Users/*/.cursor/` fallback
+2. Cursor ephemeral workspace slugs produced "json" as project name → extract timestamp ID
+3. Tracking DB timestamps stored as epoch-ms and git date strings → `_parse_tracking_timestamp()` parser
+
+Tests grew from 43 → 53.
+
+### PR #1 Rework — Round 1 (14 items)
+
+16-step / 6-phase plan. Key changes:
+- SQL injection surface eliminated (parameterized queries throughout)
+- Hook architecture: `&` backgrounding → fork-and-return via `hook-launcher.py` with `uv run --script`
+- Skills renamed to `cw:` namespace (`cw-query`, `cw-recall`, `cw-report`, `cw-wrapped`, `cw-initialize`)
+- Contract tests for cross-module SQL patterns (embed/vsearch source_id format, INTERVAL syntax)
+- Error logging added to sync exception paths
+
+Tests grew from 53 → 59.
+
+### PR #1 Rework — Round 2 (RW1–RW7)
+
+All isolated fixes, no cross-module interactions:
+- **RW1** (`sync.py`): Greedy filesystem reconstruction for workspace slug → project name. Walks slug parts left-to-right testing `Path.is_dir()` for single and multi-part combinations. Culturally neutral (ground truth, not heuristics). Falls back to `parts[-1]` when path doesn't exist. `@functools.lru_cache` on `_derive_project_name`.
+- **RW2** (`sync.py`): Model enrichment uses `min(model)` per conversation for deterministic mapping.
+- **RW3** (`sync.py`): `open(fp, encoding='utf-8', errors='replace')` on JSONL reads.
+- **RW4** (`sync.py`): `datetime.fromisoformat()` added before `parsedate_to_datetime` fallback; lazy import moved to top-level.
+- **RW5** (`static/index.html`): Date parsing via `new Date(year, monthIndex, day)` to avoid UTC midnight → local timezone day shift.
+- **RW6** (`tests/test_sync.py`): `test_long_text_truncated` uses pytest `tmp_path` fixture.
+- **RW7** (`skills/cw-report/SKILL.md`, `skills/cw-wrapped/SKILL.md`): All query examples use `$QUERY_SCRIPT` instead of hardcoded `${CURSOR_PLUGIN_ROOT}/scripts/query.py`.
+
+Tests grew from 59 → 83.
+
+### PR #1 Rework — Round 3 (RW8–RW10)
+
+Build order: RW10 → RW9 → RW8 (smallest risk first; schema before embed).
+
+- **RW10** (`sync.py`): `_ingest_jsonl` catches only `OSError` on file open; `json.loads` failures handled per-line. Logic/programming errors propagate instead of being silently swallowed.
+- **RW9** (`sync.py`, `schema.sql`, `scripts/schema_util.py`): Watermark extended to `(mtime, last_path)` for deterministic ordering. `_sync_state` gains `last_path VARCHAR` column. `_file_newer_than_watermark` predicate: `mtime > last_mtime OR (mtime == last_mtime AND path > last_path)`. Idempotent migration via `schema_util.ensure_sync_state_last_path()` called from both sync and embed `init_db`.
+- **RW8** (`embed.py`): `batch_encode_documents` + `_mean_pool_vectors` — long texts chunked via existing `chunk_text()`, all chunks encoded in batches, then mean-pooled per document to produce one vector per source. Tests verify aggregated ≠ first-chunk-only.
+
+Tests grew from 83 → 92.
+
+### Files Touched (cumulative)
+
+Scripts: `sync.py`, `query.py`, `dashboard.py`, `embed.py`, `vsearch.py`, `hook-launcher.py`, `schema_util.py`, `uv_torch_smoke.py`
+Schema: `schema.sql`
+Frontend: `static/index.html`
+Tests: `tests/test_sync.py`, `tests/test_embed.py`, `tests/conftest.py`
+Skills: `skills/cw-query/`, `skills/cw-recall/`, `skills/cw-report/`, `skills/cw-wrapped/`, `skills/cw-initialize/`
+Plugin: `hooks/hooks.json`, `plugin.json`
+Docs: `README.md`, `LICENSE`
+
+## TESTING
+
+- **Unit/integration tests**: 92 pytest tests covering schema, JSONL parsing, discovery, sync integration, tracking DB, workspace slug reconstruction, model determinism, ISO timestamps, watermark tiebreaker, embedding chunking/aggregation, exception propagation.
+- **Run command**: `uv run --with pytest --with duckdb pytest tests/ -v`
+- **Smoke testing**: Verified against real Cursor data — 220 sessions, 7627 messages, 1641 tool calls, 326 scored commits, 157 model-conversation pairs.
+- **QA phases**: Semantic QA (`/niko-qa`) passed after each major build round. Caught hook-launcher `sys.executable` bug (Round 1), `systemPatterns.md` drift (Round 3).
+- **Manual plugin testing**: Local symlink install + `~/.claude/` registration; full sync/embed/dashboard cycle verified.
+
+## LESSONS LEARNED
+
+### Technical
+
+- **PEP 723 child spawning**: Scripts that run other PEP 723 scripts must use `uv run --script`, not `sys.executable` — the child needs `uv` to resolve its inline dependencies.
+- **DuckDB parameterized INTERVAL**: Use `? * INTERVAL '1 day'` instead of `INTERVAL ? DAY`.
+- **Watermark ordering**: Mtime-only incremental scans are unsafe when multiple files share an mtime. A path tiebreaker with lexicographic ordering after `(mtime, path)` sort is necessary for deterministic replay.
+- **Long-text embeddings**: Chunking without per-document aggregation silently under-represents long content. Mean-pooling chunk vectors closes that gap.
+- **ETL exception boundaries**: Catch I/O failures at open/read; let parse/logic errors propagate, or tests will not catch regressions masked as "skipped line."
+- **Cursor JSONL is sparser than Claude Code**: No per-message UUIDs, timestamps, or tokens. Synthetic UUIDs work for dedup but aren't semantically meaningful.
+- **`ai-code-tracking.db` is the richest Cursor-specific data source**: Model info, per-request timestamps, commit-level AI attribution — none of which exist in the JSONL.
+- **WSL path bifurcation**: The IDE server runs in WSL but desktop-side data lives on Windows mount paths. Any Cursor tool touching non-transcript data needs WSL-aware path resolution.
+- **Real-world data formats are unpredictable**: Tracking DB stores epoch-ms in one column and git date strings in another. Only real data exposed the mismatch.
+
+### Process
+
+- **Proactive data investigation during planning is high-ROI**: The `ai-code-tracking.db` integration was discovered because planning invested time examining actual Cursor data files. Added 5 steps but made the product significantly more valuable.
+- **Port tasks are faster than they look**: 28-step plan was daunting but inherited architecture meant most steps were mechanical. Only the JSONL parser and tracking DB integration (~200 lines of ~1500 total) were genuinely novel.
+- **Manual testing catches what unit tests can't**: All post-port rework bugs were environment-specific or data-format-specific. Always test against real production data before declaring done.
+- **Contract tests** for SQL and cross-module assumptions are valuable when imports are heavy (embed/vsearch).
+- **Semantic QA** catches invocation and documentation drift that unit tests miss.
+- **Multi-round PR rework** benefits from a single task file with rounds stacked — avoids losing context between reflects and re-reviews.
+- **Honest "reject duplicate feedback"** saves churn when rationale is recorded once and referenced.
+
+## PROCESS IMPROVEMENTS
+
+- **Architecture docs in QA checklist**: When behavior changes (e.g. watermark format, embedding pipeline), `systemPatterns.md` should be explicitly checked in QA — Round 3 QA caught this drift.
+- **Smoke test gate before PR**: Environment-specific bugs (WSL paths, timestamp formats) were caught only in manual testing after the initial build. A "smoke against real data" step should be part of build verification for data pipeline tools.
+- **Preflight dialogue for design alternatives**: Round 2's RW1 approach was improved via operator pushback during preflight (heuristic → filesystem reconstruction). The preflight phase can function as a lightweight creative checkpoint when design questions surface.
+
+## TECHNICAL IMPROVEMENTS
+
+- **Positional INSERT fragility**: Sessions and scored_commits INSERTs use positional `VALUES (?,?,...?)` without naming columns. Messages/tool_calls use named columns. This inconsistency should be unified in a future cleanup.
+- **Content-hash UUIDs**: The synthetic `{session_id}:{line_idx}` UUID scheme works for dedup but isn't semantically meaningful. A content-hash-based UUID would enable better cross-session dedup.
+- **Plugin testing documentation**: Cursor's plugin system is underdocumented for local development. The README now captures the workflow, but upstream Cursor documentation would benefit from this.
+
+## NEXT STEPS
+
+- Merge PR #1 to `main` — this archive covers all work on the branch.
+- Future work tracked under VISION2: proper Python packaging (`pyproject.toml`, `uv.lock`), supply chain hardening, multi-harness adapter interface.
