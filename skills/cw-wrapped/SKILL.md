@@ -53,49 +53,49 @@ GROUP BY 1 ORDER BY 2 DESC
 
 ### All-time stats
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT COUNT(*) total_sessions, SUM(message_count) total_messages, COUNT(DISTINCT project_name) total_projects, MIN(created_at)::DATE first_session, MAX(created_at)::DATE latest_session FROM sessions"
+uv run --script "$QUERY_SCRIPT" sql "SELECT COUNT(*) total_sessions, SUM(message_count) total_messages, COUNT(DISTINCT project_name) total_projects, MIN(created_at)::DATE first_session, MAX(created_at)::DATE latest_session FROM sessions"
 ```
 
 ### Top projects by session count
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT project_name, COUNT(*) sessions, SUM(message_count) messages FROM sessions GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
+uv run --script "$QUERY_SCRIPT" sql "SELECT project_name, COUNT(*) sessions, SUM(message_count) messages FROM sessions GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
 ```
 
 ### Favorite tools (top 10)
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT tc.tool_name, COUNT(*) uses FROM tool_calls tc GROUP BY 1 ORDER BY 2 DESC LIMIT 10"
+uv run --script "$QUERY_SCRIPT" sql "SELECT tc.tool_name, COUNT(*) uses FROM tool_calls tc GROUP BY 1 ORDER BY 2 DESC LIMIT 10"
 ```
 
 ### Longest session ever
 
 NOTE: `first_prompt` contains raw Cursor system context (XML tags). Use `regexp_extract` to get the actual user prompt:
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT project_name, created_at::DATE, message_count, LEFT(COALESCE(NULLIF(regexp_extract(first_prompt, '<user_query>\s*([\s\S]*?)\s*</user_query>', 1), ''), NULLIF(regexp_extract(first_prompt, '(/\S+[^\n<]*)', 1), ''), first_prompt), 200) AS prompt FROM sessions ORDER BY message_count DESC LIMIT 1"
+uv run --script "$QUERY_SCRIPT" sql "SELECT project_name, created_at::DATE, message_count, LEFT(COALESCE(NULLIF(regexp_extract(first_prompt, '<user_query>\s*([\s\S]*?)\s*</user_query>', 1), ''), NULLIF(regexp_extract(first_prompt, '(/\S+[^\n<]*)', 1), ''), first_prompt), 200) AS prompt FROM sessions ORDER BY message_count DESC LIMIT 1"
 ```
 
 ### Busiest day
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT created_at::DATE as day, COUNT(*) sessions, SUM(message_count) messages FROM sessions GROUP BY 1 ORDER BY 2 DESC LIMIT 1"
+uv run --script "$QUERY_SCRIPT" sql "SELECT created_at::DATE as day, COUNT(*) sessions, SUM(message_count) messages FROM sessions GROUP BY 1 ORDER BY 2 DESC LIMIT 1"
 ```
 
 ### Models used
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT model, COUNT(*) messages FROM messages WHERE model IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
+uv run --script "$QUERY_SCRIPT" sql "SELECT model, COUNT(*) messages FROM messages WHERE model IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
 ```
 
 ### Streak (consecutive days)
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "WITH days AS (SELECT DISTINCT created_at::DATE as d FROM sessions), streaks AS (SELECT d, d - ROW_NUMBER() OVER (ORDER BY d) * INTERVAL '1 day' as grp FROM days) SELECT COUNT(*) as streak_days, MIN(d)::DATE as from_date, MAX(d)::DATE as to_date FROM streaks GROUP BY grp ORDER BY streak_days DESC LIMIT 1"
+uv run --script "$QUERY_SCRIPT" sql "WITH days AS (SELECT DISTINCT created_at::DATE as d FROM sessions), streaks AS (SELECT d, d - ROW_NUMBER() OVER (ORDER BY d) * INTERVAL '1 day' as grp FROM days) SELECT COUNT(*) as streak_days, MIN(d)::DATE as from_date, MAX(d)::DATE as to_date FROM streaks GROUP BY grp ORDER BY streak_days DESC LIMIT 1"
 ```
 
 ### Session distribution by hour of day
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT EXTRACT(HOUR FROM created_at) as hour, COUNT(*) sessions FROM sessions GROUP BY 1 ORDER BY 2 DESC LIMIT 3"
+uv run --script "$QUERY_SCRIPT" sql "SELECT EXTRACT(HOUR FROM created_at) as hour, COUNT(*) sessions FROM sessions GROUP BY 1 ORDER BY 2 DESC LIMIT 3"
 ```
 
 ### AI attribution (if available)
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT COUNT(*) total_commits, SUM(lines_added) total_lines, AVG(CAST(REPLACE(COALESCE(v2_ai_percentage, '0'), '%', '') AS FLOAT)) avg_ai_pct FROM scored_commits"
+uv run --script "$QUERY_SCRIPT" sql "SELECT COUNT(*) total_commits, SUM(lines_added) total_lines, AVG(CAST(REPLACE(COALESCE(v2_ai_percentage, '0'), '%', '') AS FLOAT)) avg_ai_pct FROM scored_commits"
 ```
 
 ## Presentation

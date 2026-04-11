@@ -6,14 +6,13 @@ cursor-warehouse PR #1 Rework (Round 2)
 
 ## Phase
 
-PLAN - COMPLETE
+BUILD - COMPLETE
 
 ## What Was Done
 
-- Triaged 10 findings from second round of PR review: 7 valid (4 sync.py bugs, 1 frontend bug, 1 test hygiene, 1 docs inconsistency), 3 rejected (2 duplicates of previously-triaged items, 1 nitpick)
-- Verified each finding against current codebase before categorizing
-- Created implementation plan: 8 steps across 5 phases, all isolated fixes with no cross-module dependencies
+- Implemented RW1–RW7 from the preflight-approved plan: `scripts/sync.py` (filesystem reconstruction for workspace slugs with `_RECONSTRUCTION_ROOTS` + WSL `/mnt/<drive>/`, `lru_cache` on `_derive_project_name`, deterministic `min(model)` per conversation, UTF-8 JSONL reads, ISO 8601 in `_parse_tracking_timestamp` with `parsedate_to_datetime` at top level), `static/index.html` (local calendar dates for daily/weekly chart labels), `skills/cw-report` and `skills/cw-wrapped` (query examples use `uv run --script "$QUERY_SCRIPT"`).
+- Tests: extended `tests/test_sync.py` with RW1 reconstruction/fallback/WSL cases, RW2 deterministic model enrichment, RW4 timestamp parsing, RW6 `tmp_path` for long-text truncation; full suite **83** tests passing.
 
 ## Next Step
 
-Proceed to Preflight phase to validate the plan.
+Run `/niko-qa` for semantic QA review.

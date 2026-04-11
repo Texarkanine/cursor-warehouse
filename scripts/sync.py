@@ -6,17 +6,22 @@
 """cursor-warehouse: incremental ETL from Cursor agent transcripts into DuckDB."""
 
 import argparse
+import functools
 import json
 import re
 import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import duckdb
 
 CURSOR_DIR = Path.home() / ".cursor"
+
+# Roots for workspace-slug → filesystem path reconstruction (monkeypatch in tests).
+_RECONSTRUCTION_ROOTS: list[Path] = [Path("/")]
 DB_PATH = CURSOR_DIR / "cursor-warehouse.duckdb"
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
@@ -117,11 +122,59 @@ def extract_first_prompt(content) -> str | None:
     return None
 
 
+def _reconstruct_project_name(parts: list[str], root: Path) -> str | None:
+    """Map hyphen-split slug segments to a real directory under root; return its name.
+
+    At each step, prefer a single segment as the next directory name; if that path is
+    not a directory, try multi-segment names (longest first) so names with hyphens
+    resolve correctly. Returns None if not all segments can be matched.
+    """
+    if not parts:
+        return ""
+    root = root.resolve()
+    i = 0
+    current = root
+    while i < len(parts):
+        remaining = len(parts) - i
+        found = False
+        if remaining >= 1:
+            cand = current / parts[i]
+            if cand.is_dir():
+                current = cand
+                i += 1
+                found = True
+        if not found:
+            for k in range(remaining, 1, -1):
+                name = "-".join(parts[i : i + k])
+                cand = current / name
+                if cand.is_dir():
+                    current = cand
+                    i += k
+                    found = True
+                    break
+        if not found:
+            return None
+    return current.name
+
+
+def _candidate_reconstruction_roots(parts: list[str]) -> list[tuple[Path, list[str]]]:
+    """Return (root, parts_slice) pairs to try for filesystem reconstruction."""
+    out: list[tuple[Path, list[str]]] = [(r, parts) for r in _RECONSTRUCTION_ROOTS]
+    if len(parts) >= 2 and len(parts[0]) == 1 and parts[0].isalpha():
+        drive = parts[0].lower()
+        out.append((_wsl_mnt_root() / drive, parts[1:]))
+    return out
+
+
+@functools.lru_cache(maxsize=4096)
 def _derive_project_name(workspace_slug: str) -> str:
     """Derive a human-readable project name from a Cursor workspace slug.
 
     Workspace slugs encode paths with hyphens, e.g.
     'home-mobaxterm-Documents-git-myproject' -> 'myproject'
+
+    When the encoded path still exists on disk, greedy directory matching recovers
+    the true final directory name (including multi-hyphen names).
 
     Cursor ephemeral workspaces have slugs like:
     's-Users-Austin-AppData-Roaming-Cursor-Workspaces-1764355524551-workspace-json'
@@ -135,10 +188,17 @@ def _derive_project_name(workspace_slug: str) -> str:
     # followed by a numeric timestamp, then "workspace", then "json"
     try:
         ws_idx = parts.index("Workspaces")
-        if (ws_idx + 1 < len(parts) and parts[ws_idx + 1].isdigit()):
+        if ws_idx + 1 < len(parts) and parts[ws_idx + 1].isdigit():
             return f"workspace-{parts[ws_idx + 1]}"
     except ValueError:
         pass
+
+    for root, pslice in _candidate_reconstruction_roots(parts):
+        if not pslice:
+            continue
+        resolved = _reconstruct_project_name(pslice, root)
+        if resolved is not None:
+            return resolved
 
     return parts[-1] if parts else workspace_slug
 
@@ -156,7 +216,7 @@ def _ingest_jsonl(con: duckdb.DuckDBPyConnection, fp: Path, session_id: str,
     models_seen = set()
 
     try:
-        with open(fp) as f:
+        with open(fp, encoding="utf-8", errors="replace") as f:
             for line_idx, line in enumerate(f):
                 line = line.strip()
                 if not line:
@@ -452,14 +512,21 @@ def _sync_model_from_tracking(con: duckdb.DuckDBPyConnection, tracking_con, verb
     if not rows:
         return
 
+    model_by_conv: dict[str, str] = {}
     for conversation_id, model in rows:
+        if conversation_id is None or model is None:
+            continue
+        prev = model_by_conv.get(conversation_id)
+        model_by_conv[conversation_id] = model if prev is None else min(prev, model)
+
+    for conversation_id, model in model_by_conv.items():
         con.execute(
             "UPDATE messages SET model = ? WHERE session_id = ? AND model IS NULL",
             [model, conversation_id],
         )
 
     if verbose:
-        print(f"  Model enrichment: {len(rows)} conversation-model pairs from tracking DB")
+        print(f"  Model enrichment: {len(model_by_conv)} conversations from tracking DB")
 
 
 def _parse_tracking_timestamp(val) -> str | None:
@@ -484,8 +551,16 @@ def _parse_tracking_timestamp(val) -> str | None:
             return datetime.fromtimestamp(int(val) / 1000, tz=timezone.utc).isoformat()
         except (ValueError, OSError):
             return None
+    # ISO 8601 (incl. trailing Z)
+    iso_val = val.replace("Z", "+00:00", 1) if val.endswith("Z") else val
+    try:
+        dt = datetime.fromisoformat(iso_val)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+    except (ValueError, TypeError):
+        pass
     # Git date format: 'Fri Feb 20 09:59:00 2026 -0600'
-    from email.utils import parsedate_to_datetime
     try:
         return parsedate_to_datetime(val).isoformat()
     except (ValueError, TypeError):

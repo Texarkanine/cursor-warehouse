@@ -49,31 +49,31 @@ SELECT model, COUNT(*) FROM messages m JOIN sessions s ON m.session_id = s.sessi
 ## 1. Overview (last 30 days vs previous 30 days)
 
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT 'last_30d' as period, COUNT(*) sessions, SUM(message_count) messages, ROUND(AVG(message_count), 1) avg_msgs, COUNT(DISTINCT project_name) projects FROM sessions WHERE created_at >= current_date - INTERVAL '30 days' UNION ALL SELECT 'prev_30d', COUNT(*), SUM(message_count), ROUND(AVG(message_count), 1), COUNT(DISTINCT project_name) FROM sessions WHERE created_at >= current_date - INTERVAL '60 days' AND created_at < current_date - INTERVAL '30 days'"
+uv run --script "$QUERY_SCRIPT" sql "SELECT 'last_30d' as period, COUNT(*) sessions, SUM(message_count) messages, ROUND(AVG(message_count), 1) avg_msgs, COUNT(DISTINCT project_name) projects FROM sessions WHERE created_at >= current_date - INTERVAL '30 days' UNION ALL SELECT 'prev_30d', COUNT(*), SUM(message_count), ROUND(AVG(message_count), 1), COUNT(DISTINCT project_name) FROM sessions WHERE created_at >= current_date - INTERVAL '60 days' AND created_at < current_date - INTERVAL '30 days'"
 ```
 
 ## 2. Model distribution (last 30 days)
 
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT COALESCE(m.model, 'unknown') model, COUNT(*) messages, COUNT(DISTINCT m.session_id) sessions FROM messages m JOIN sessions s ON m.session_id = s.session_id WHERE s.created_at >= current_date - INTERVAL '30 days' GROUP BY 1 ORDER BY 2 DESC"
+uv run --script "$QUERY_SCRIPT" sql "SELECT COALESCE(m.model, 'unknown') model, COUNT(*) messages, COUNT(DISTINCT m.session_id) sessions FROM messages m JOIN sessions s ON m.session_id = s.session_id WHERE s.created_at >= current_date - INTERVAL '30 days' GROUP BY 1 ORDER BY 2 DESC"
 ```
 
 ## 3. Session efficiency (short vs long, abandoned sessions)
 
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT CASE WHEN message_count <= 3 THEN 'abandoned (1-3 msgs)' WHEN message_count <= 10 THEN 'short (4-10 msgs)' WHEN message_count <= 30 THEN 'medium (11-30 msgs)' ELSE 'long (31+ msgs)' END as bucket, COUNT(*) sessions, ROUND(AVG(message_count), 1) avg_msgs FROM sessions WHERE created_at >= current_date - INTERVAL '30 days' GROUP BY 1 ORDER BY MIN(message_count)"
+uv run --script "$QUERY_SCRIPT" sql "SELECT CASE WHEN message_count <= 3 THEN 'abandoned (1-3 msgs)' WHEN message_count <= 10 THEN 'short (4-10 msgs)' WHEN message_count <= 30 THEN 'medium (11-30 msgs)' ELSE 'long (31+ msgs)' END as bucket, COUNT(*) sessions, ROUND(AVG(message_count), 1) avg_msgs FROM sessions WHERE created_at >= current_date - INTERVAL '30 days' GROUP BY 1 ORDER BY MIN(message_count)"
 ```
 
 ## 4. Tool usage distribution
 
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT tc.tool_name, COUNT(*) calls, ROUND(COUNT(*)::FLOAT / SUM(COUNT(*)) OVER () * 100, 1) as pct FROM tool_calls tc JOIN sessions s ON tc.session_id = s.session_id WHERE s.created_at >= current_date - INTERVAL '30 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 15"
+uv run --script "$QUERY_SCRIPT" sql "SELECT tc.tool_name, COUNT(*) calls, ROUND(COUNT(*)::FLOAT / SUM(COUNT(*)) OVER () * 100, 1) as pct FROM tool_calls tc JOIN sessions s ON tc.session_id = s.session_id WHERE s.created_at >= current_date - INTERVAL '30 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 15"
 ```
 
 ## 5. Write/Read ratio trend (AI collaboration maturity)
 
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT DATE_TRUNC('week', s.created_at)::DATE as week, COUNT(*) FILTER (WHERE tc.tool_name IN ('Write', 'StrReplace', 'EditNotebook')) as writes, COUNT(*) FILTER (WHERE tc.tool_name IN ('Read', 'Glob', 'Grep', 'SemanticSearch')) as reads, ROUND(COUNT(*) FILTER (WHERE tc.tool_name IN ('Write', 'StrReplace', 'EditNotebook'))::FLOAT / NULLIF(COUNT(*) FILTER (WHERE tc.tool_name IN ('Read', 'Glob', 'Grep', 'SemanticSearch')), 0), 2) as write_read_ratio FROM tool_calls tc JOIN sessions s ON tc.session_id = s.session_id GROUP BY 1 ORDER BY 1 DESC LIMIT 8"
+uv run --script "$QUERY_SCRIPT" sql "SELECT DATE_TRUNC('week', s.created_at)::DATE as week, COUNT(*) FILTER (WHERE tc.tool_name IN ('Write', 'StrReplace', 'EditNotebook')) as writes, COUNT(*) FILTER (WHERE tc.tool_name IN ('Read', 'Glob', 'Grep', 'SemanticSearch')) as reads, ROUND(COUNT(*) FILTER (WHERE tc.tool_name IN ('Write', 'StrReplace', 'EditNotebook'))::FLOAT / NULLIF(COUNT(*) FILTER (WHERE tc.tool_name IN ('Read', 'Glob', 'Grep', 'SemanticSearch')), 0), 2) as write_read_ratio FROM tool_calls tc JOIN sessions s ON tc.session_id = s.session_id GROUP BY 1 ORDER BY 1 DESC LIMIT 8"
 ```
 
 ## 6. First prompt quality signal
@@ -81,19 +81,19 @@ ${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT DATE_TRUNC('week', s.created_
 NOTE: `first_prompt` contains raw Cursor system context (XML tags like `<user_query>`, `<rules>`, etc.), so `LENGTH(first_prompt)` measures the *entire framed message*, not just the user's words. Extract user intent with `regexp_extract` before measuring length:
 
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "WITH prompts AS (SELECT session_id, message_count, LENGTH(COALESCE(NULLIF(regexp_extract(first_prompt, '<user_query>\s*([\s\S]*?)\s*</user_query>', 1), ''), NULLIF(regexp_extract(first_prompt, '(/\S+[^\n<]*)', 1), ''), first_prompt)) AS prompt_len FROM sessions WHERE created_at >= current_date - INTERVAL '30 days' AND first_prompt IS NOT NULL) SELECT CASE WHEN prompt_len < 50 THEN 'short (<50 chars)' WHEN prompt_len < 200 THEN 'medium (50-200)' ELSE 'detailed (200+)' END as prompt_length, COUNT(*) sessions, ROUND(AVG(message_count), 1) avg_msgs FROM prompts GROUP BY 1 ORDER BY MIN(prompt_len)"
+uv run --script "$QUERY_SCRIPT" sql "WITH prompts AS (SELECT session_id, message_count, LENGTH(COALESCE(NULLIF(regexp_extract(first_prompt, '<user_query>\s*([\s\S]*?)\s*</user_query>', 1), ''), NULLIF(regexp_extract(first_prompt, '(/\S+[^\n<]*)', 1), ''), first_prompt)) AS prompt_len FROM sessions WHERE created_at >= current_date - INTERVAL '30 days' AND first_prompt IS NOT NULL) SELECT CASE WHEN prompt_len < 50 THEN 'short (<50 chars)' WHEN prompt_len < 200 THEN 'medium (50-200)' ELSE 'detailed (200+)' END as prompt_length, COUNT(*) sessions, ROUND(AVG(message_count), 1) avg_msgs FROM prompts GROUP BY 1 ORDER BY MIN(prompt_len)"
 ```
 
 ## 7. AI attribution summary (from scored_commits)
 
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT branch_name, COUNT(*) commits, SUM(lines_added) total_added, SUM(composer_lines_added + tab_lines_added) ai_lines, SUM(human_lines_added) human_lines, AVG(CAST(REPLACE(COALESCE(v2_ai_percentage, '0'), '%', '') AS FLOAT)) avg_ai_pct FROM scored_commits GROUP BY 1 ORDER BY 2 DESC LIMIT 10"
+uv run --script "$QUERY_SCRIPT" sql "SELECT branch_name, COUNT(*) commits, SUM(lines_added) total_added, SUM(composer_lines_added + tab_lines_added) ai_lines, SUM(human_lines_added) human_lines, AVG(CAST(REPLACE(COALESCE(v2_ai_percentage, '0'), '%', '') AS FLOAT)) avg_ai_pct FROM scored_commits GROUP BY 1 ORDER BY 2 DESC LIMIT 10"
 ```
 
 ## 8. Daily activity heatmap
 
 ```bash
-${CURSOR_PLUGIN_ROOT}/scripts/query.py sql "SELECT created_at::DATE as day, COUNT(*) sessions, SUM(message_count) msgs FROM sessions WHERE created_at >= current_date - INTERVAL '14 days' GROUP BY 1 ORDER BY 1 DESC"
+uv run --script "$QUERY_SCRIPT" sql "SELECT created_at::DATE as day, COUNT(*) sessions, SUM(message_count) msgs FROM sessions WHERE created_at >= current_date - INTERVAL '14 days' GROUP BY 1 ORDER BY 1 DESC"
 ```
 
 ## Report format

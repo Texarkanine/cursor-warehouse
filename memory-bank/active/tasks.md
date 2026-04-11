@@ -12,7 +12,8 @@ Address valid findings from second round of PR review feedback on [PR #1](https:
 
 #### RW1. scripts/sync.py: workspace_slug fallback loses context (line 143)
 **Source:** PR reviewer (inline)
-**Justification:** Verified. `return parts[-1]` returns only the last hyphen-separated token (e.g., `"warehouse"` from `"s-Users-Austin-Documents-git-cursor-warehouse"`), which is ambiguous and causes collisions when multiple projects share a common trailing name. Returning `"-".join(parts[-2:])` when `len(parts) >= 2` preserves enough context (e.g., `"cursor-warehouse"`) while remaining concise. One-line fix, real data correctness issue.
+**Justification:** Verified. `return parts[-1]` returns only the last hyphen-separated token (e.g., `"warehouse"` from `"s-Users-Austin-Documents-git-cursor-warehouse"`), which is ambiguous and causes collisions when multiple projects share a common trailing name.
+**Approach (revised at preflight):** Greedy filesystem reconstruction. The slug encodes a real filesystem path with hyphens replacing separators. Walk parts left-to-right, testing `Path.is_dir()` for single parts first, then progressively longer hyphen-joined combinations (longest first) to handle directory names containing hyphens. The project name is the `.name` of the last matched directory when all parts resolve, or `parts[-1]` when reconstruction fails (deleted path, different machine — no worse than current behavior). Try `/` first (Linux/macOS), then `/mnt/<first-part>/` for WSL Windows-origin slugs. Reconstruction roots stored in a module-level list for testability (monkeypatchable). Culturally neutral — uses ground truth, not heuristics. All existing tests pass unchanged (synthetic slugs fall through to fallback).
 
 #### RW2. scripts/sync.py: Model enrichment nondeterminism (lines 443-459)
 **Source:** PR reviewer (inline)
@@ -85,7 +86,9 @@ None — all rework items have clear implementations.
 ### Behaviors to Verify
 
 **RW1 (workspace_slug):**
-- Multi-token slug → returns last two tokens joined (e.g., `"cursor-warehouse"`)
+- Slug whose path exists on disk → filesystem reconstruction recovers correct project name (including multi-hyphen names and non-ASCII paths)
+- Slug whose path does NOT exist → falls back to `parts[-1]` (same as current behavior)
+- WSL slug with drive letter prefix → tries `/mnt/<drive>/...` reconstruction
 - Single-token slug → returns that token
 - Empty slug → returns `""`
 - Ephemeral workspace slug with "Workspaces" → existing behavior unchanged
@@ -107,7 +110,10 @@ None — all rework items have clear implementations.
 
 ### New/Modified Tests
 
-- RW1: Add test cases for `_slug_to_project` two-token fallback
+- RW1: Add test for filesystem reconstruction with multi-hyphen directory (create real dirs under `tmp_path`, monkeypatch roots)
+- RW1: Add test for reconstruction fallback when path doesn't exist (returns `parts[-1]`)
+- RW1: Add test for WSL `/mnt/<drive>/` root attempt
+- RW1: Existing `test_standard_slug` unchanged — still expects `"myproject"` ✅
 - RW2: Add test for deterministic model selection with multi-model conversations
 - RW4: Add test cases for ISO timestamp parsing in `_parse_tracking_timestamp`
 - RW6: Modify `test_long_text_truncated` to accept `tmp_path`
@@ -123,7 +129,7 @@ Existing full sync integration tests cover the overall pipeline. No new integrat
 1. **Add/modify tests for RW1, RW2, RW4, RW6**
     - Files: `tests/test_sync.py`
     - Changes:
-      - RW1: Add test cases for `_slug_to_project` with multi-token slugs, single-token slugs
+      - RW1: Add tests for filesystem reconstruction (real dirs under `tmp_path`, monkeypatch roots) and fallback
       - RW2: Add test that multiple models for one conversation produce deterministic result
       - RW4: Add test cases for ISO string parsing in `_parse_tracking_timestamp`
       - RW6: Change `test_long_text_truncated` to accept `tmp_path`, use `tmp_path / "tmp_long.jsonl"`
@@ -132,7 +138,11 @@ Existing full sync integration tests cover the overall pipeline. No new integrat
 
 2. **Fix workspace_slug fallback (RW1)**
     - Files: `scripts/sync.py`
-    - Changes: Line 143: replace `return parts[-1] if parts else workspace_slug` with `return "-".join(parts[-2:]) if len(parts) >= 2 else (parts[0] if parts else workspace_slug)`
+    - Changes:
+      - Add `_RECONSTRUCTION_ROOTS: list[Path]` module-level (default `[Path("/")]`)
+      - Add `_reconstruct_project_name(parts, root)` helper: greedy left-to-right `is_dir()` walk, trying single parts then longest multi-part joins; returns directory `.name` on full match or `None` on failure
+      - Replace line 143 fallback: try reconstruction against each root (native `/`, then WSL `/mnt/<drive>/` if first part is a single char); fall back to `parts[-1]` when all roots fail
+      - Add `@functools.lru_cache` on `_derive_project_name` — many sessions share the same workspace slug, so cache avoids redundant filesystem walks during sync
 
 3. **Fix model enrichment nondeterminism (RW2)**
     - Files: `scripts/sync.py`
@@ -142,9 +152,11 @@ Existing full sync integration tests cover the overall pipeline. No new integrat
     - Files: `scripts/sync.py`
     - Changes: Line 159: `open(fp)` → `open(fp, encoding='utf-8', errors='replace')`
 
-5. **Fix ISO timestamp parsing (RW4)**
+5. **Fix ISO timestamp parsing (RW4) + lazy import cleanup**
     - Files: `scripts/sync.py`
-    - Changes: Lines 487-493: Insert `datetime.fromisoformat(val)` attempt (with UTC normalization for naive datetimes) before `parsedate_to_datetime` fallback
+    - Changes:
+      - Move `from email.utils import parsedate_to_datetime` from line 488 (lazy import inside `_parse_tracking_timestamp`) to top-level imports
+      - Insert `datetime.fromisoformat(val)` attempt (with UTC normalization for naive datetimes) before `parsedate_to_datetime` fallback
 
 ### Phase 3: Frontend fix
 
@@ -181,6 +193,6 @@ No new technology — all fixes use existing Python stdlib and JavaScript APIs.
 - [x] Test planning complete (TDD)
 - [x] Implementation plan complete (8 steps across 5 phases)
 - [x] Technology validation complete (no new tech)
-- [ ] Preflight
-- [ ] Build
+- [x] Preflight (PASS — revised: container-dir heuristic for RW1, lazy import fix added to RW4)
+- [x] Build
 - [ ] QA

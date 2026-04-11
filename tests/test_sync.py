@@ -230,25 +230,22 @@ class TestIngestJsonl:
         ).fetchall()
         assert len(rows) > 0
 
-    def test_long_text_truncated(self, db):
+    def test_long_text_truncated(self, db, tmp_path):
         """Very long text_content is truncated to 2000 chars."""
         import sync
         long_text = "x" * 5000
-        tmp = FIXTURES_DIR.parent / "tmp_long.jsonl"
-        try:
-            with open(tmp, "w") as f:
-                f.write(json.dumps({
-                    "role": "user",
-                    "message": {"role": "user", "content": [{"type": "text", "text": long_text}]},
-                }) + "\n")
-            result = sync._ingest_jsonl(db, fp=tmp, session_id="long-session")
-            assert result is not None
-            row = db.execute(
-                "SELECT text_content FROM messages WHERE session_id = 'long-session'"
-            ).fetchone()
-            assert len(row[0]) <= 2000
-        finally:
-            tmp.unlink(missing_ok=True)
+        tmp = tmp_path / "tmp_long.jsonl"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "role": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": long_text}]},
+            }) + "\n")
+        result = sync._ingest_jsonl(db, fp=tmp, session_id="long-session")
+        assert result is not None
+        row = db.execute(
+            "SELECT text_content FROM messages WHERE session_id = 'long-session'"
+        ).fetchone()
+        assert len(row[0]) <= 2000
 
     def test_token_counts_default_to_zero(self, db):
         """Cursor has no per-message tokens; session token totals default to 0."""
@@ -664,6 +661,37 @@ class TestTrackingDbIntegration:
         assert with_model > 0
         con.close()
 
+    def test_model_enrichment_deterministic_min_model(self, tmp_path):
+        """Multiple models for one conversationId pick lexicographic min (deterministic)."""
+        import sync
+
+        session_id = "multi-model-one-conv"
+        projects_dir = tmp_path / "projects"
+        session_dir = _make_session_dir(projects_dir, "my-workspace", session_id)
+        _copy_fixture("cursor_session.jsonl", session_dir, f"{session_id}.jsonl")
+
+        db_path = tmp_path / "test.duckdb"
+        con = duckdb.connect(str(db_path))
+        con.execute(SCHEMA_PATH.read_text())
+        sync.sync_all(con, projects_dir)
+
+        tracking_path = tmp_path / "ai-code-tracking.db"
+        _create_tracking_db(tracking_path, code_hashes=[
+            {"conversationId": session_id, "model": "claude-4.6-opus-high-thinking"},
+            {"conversationId": session_id, "model": "aaa-stable-model"},
+            {"conversationId": session_id, "model": "zzz-beta"},
+        ])
+
+        sync.sync_tracking_db(con, tracking_db_path=tracking_path)
+
+        models = con.execute(
+            "SELECT DISTINCT model FROM messages WHERE session_id = ? AND model IS NOT NULL",
+            [session_id],
+        ).fetchall()
+        assert len(models) == 1
+        assert models[0][0] == "aaa-stable-model"
+        con.close()
+
     def test_multi_model_conversations(self, tmp_path):
         """Different models on different conversations are tracked correctly."""
         import sync
@@ -948,6 +976,76 @@ class TestEmbedSourceIdContract:
 
 
 # ---------------------------------------------------------------------------
+# Dual embeddings: full text + user_query
+# ---------------------------------------------------------------------------
+
+
+class TestEmbedUserQuery:
+    """message_user_query embeddings sit alongside full message embeddings (same uuid)."""
+
+    def test_embed_creates_both_source_types(self, db, monkeypatch):
+        import embed
+        import sync
+
+        fp = FIXTURES_DIR / "cursor_session.jsonl"
+        sync._ingest_jsonl(db, fp, session_id="dual-embed-session")
+
+        def fake_batch_encode(model, texts):
+            return [[float(i % 11) / 100.0] * 384 for i in range(len(texts))]
+
+        monkeypatch.setattr(embed, "batch_encode", fake_batch_encode)
+
+        class _Dummy:
+            pass
+
+        dummy = _Dummy()
+        n_full = embed.embed_messages(db, dummy, verbose=False)
+        n_uq = embed.embed_message_user_queries(db, dummy, verbose=False)
+        assert n_full > 0
+        assert n_uq > 0
+
+        both = db.execute("""
+            SELECT m.uuid
+            FROM messages m
+            JOIN embeddings e1 ON e1.source_type = 'message' AND e1.source_id = m.uuid
+            JOIN embeddings e2 ON e2.source_type = 'message_user_query' AND e2.source_id = m.uuid
+            WHERE m.session_id = 'dual-embed-session'
+              AND m.user_query IS NOT NULL
+              AND LENGTH(TRIM(m.user_query)) >= 3
+        """).fetchall()
+        assert len(both) > 0
+
+    def test_count_unembedded_includes_message_user_query(self, db, monkeypatch):
+        import embed
+        import sync
+
+        fp = FIXTURES_DIR / "cursor_session.jsonl"
+        sync._ingest_jsonl(db, fp, session_id="count-uq-session")
+
+        counts = embed.count_unembedded(db)
+        assert "message_user_query" in counts
+        assert counts["message_user_query"] > 0
+
+        row = db.execute("""
+            SELECT uuid FROM messages
+            WHERE session_id = 'count-uq-session' AND user_query IS NOT NULL
+              AND LENGTH(TRIM(user_query)) >= 3
+            LIMIT 1
+        """).fetchone()
+        assert row is not None
+        db.execute(
+            "INSERT INTO embeddings VALUES ('message', ?, 0, 'cursor', 'x', NULL)",
+            [row[0]],
+        )
+        db.execute(
+            "INSERT INTO embeddings VALUES ('message_user_query', ?, 0, 'cursor', 'y', NULL)",
+            [row[0]],
+        )
+        counts2 = embed.count_unembedded(db)
+        assert counts2["message_user_query"] == counts["message_user_query"] - 1
+
+
+# ---------------------------------------------------------------------------
 # DuckDB INTERVAL SQL Syntax Tests
 # ---------------------------------------------------------------------------
 
@@ -1106,3 +1204,73 @@ class TestDeriveProjectName:
     def test_single_segment(self):
         import sync
         assert sync._derive_project_name("myproject") == "myproject"
+
+    def test_filesystem_reconstruction_multi_hyphen_dir(self, tmp_path, monkeypatch):
+        """When the slug path exists under a root, recover the real final directory name."""
+        import sync
+
+        proj = tmp_path / "home" / "user" / "docs" / "my-cool-project"
+        proj.mkdir(parents=True)
+        monkeypatch.setattr(sync, "_RECONSTRUCTION_ROOTS", [tmp_path])
+        sync._derive_project_name.cache_clear()
+        assert sync._derive_project_name("home-user-docs-my-cool-project") == "my-cool-project"
+
+    def test_reconstruction_fallback_when_path_missing(self, monkeypatch):
+        """When no root resolves, fall back to the last slug segment (legacy behavior)."""
+        import sync
+
+        monkeypatch.setattr(sync, "_RECONSTRUCTION_ROOTS", [Path("/__nonexistent_recon_root__")])
+        sync._derive_project_name.cache_clear()
+        assert sync._derive_project_name("a-b-c-finalsegment") == "finalsegment"
+
+    def test_wsl_drive_reconstruction(self, tmp_path, monkeypatch):
+        """WSL-style slugs try /mnt/<drive>/ plus remaining segments."""
+        import sync
+
+        # /mnt/s/Users/Austin/Documents/git/cursor-warehouse
+        leaf = (
+            tmp_path / "mnt" / "s" / "Users" / "Austin" / "Documents" / "git" / "cursor-warehouse"
+        )
+        leaf.mkdir(parents=True)
+        monkeypatch.setattr(sync, "_wsl_mnt_root", lambda: tmp_path / "mnt")
+        monkeypatch.setattr(sync, "_RECONSTRUCTION_ROOTS", [Path("/__no_match__")])
+        sync._derive_project_name.cache_clear()
+        slug = "s-Users-Austin-Documents-git-cursor-warehouse"
+        assert sync._derive_project_name(slug) == "cursor-warehouse"
+
+
+# ---------------------------------------------------------------------------
+# Tracking timestamp parsing
+# ---------------------------------------------------------------------------
+
+
+class TestParseTrackingTimestamp:
+    """Tests for _parse_tracking_timestamp — ISO 8601, epoch, git dates."""
+
+    def test_iso8601_with_z_suffix(self):
+        import sync
+        out = sync._parse_tracking_timestamp("2026-04-10T12:00:00Z")
+        assert out is not None
+        assert "2026-04-10" in out
+        assert "12" in out
+
+    def test_iso8601_naive_assumes_utc(self):
+        import sync
+        out = sync._parse_tracking_timestamp("2026-04-10T12:00:00")
+        assert out is not None
+        assert out.endswith("+00:00") or "T12:00:00" in out
+
+    def test_git_date_still_parsed(self):
+        import sync
+        out = sync._parse_tracking_timestamp("Fri Feb 20 09:59:00 2026 -0600")
+        assert out is not None
+        assert "2026" in out
+
+    def test_epoch_ms_int_unchanged(self):
+        import sync
+        out = sync._parse_tracking_timestamp(1712700000000)
+        assert out is not None
+
+    def test_none_returns_none(self):
+        import sync
+        assert sync._parse_tracking_timestamp(None) is None
