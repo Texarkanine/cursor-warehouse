@@ -55,8 +55,10 @@ The script also has built-in subcommands: `sessions`, `tools`, `search`, `projec
 - `commit_message`, `commit_date`, `v1_ai_percentage`, `v2_ai_percentage`
 
 **embeddings** — Vector embeddings for semantic search
-- `source_type` ('message'|'session'), `source_id`, `chunk_idx`, `harness`, `text_preview`, `embedding` (FLOAT[384])
-- source_id encoding: `uuid` (format `{session_id}:{line_idx}`) for messages, `session_id` for sessions
+- `source_type`: `'message'` (full `text_content`, including Cursor XML framing), `'message_user_query'` (stripped user text from `messages.user_query` — same `uuid` as the row), or `'session'`
+- `source_id`, `chunk_idx`, `harness`, `text_preview`, `embedding` (FLOAT[384])
+- source_id encoding: `uuid` (format `{session_id}:{line_idx}`) for message types, `session_id` for sessions
+- Default semantic search (`vsearch.py` without `--type`) searches **`message` + `session` only** so each user turn does not appear twice; use `--type message_user_query` to search user-intent vectors only
 
 ## Join paths
 

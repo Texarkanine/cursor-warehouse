@@ -17,6 +17,8 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 MODEL_NAME = "all-MiniLM-L6-v2"
 BATCH_SIZE = 256
 MIN_TEXT_LEN = 30
+# Short slash-commands (e.g. /cw-report) still deserve a vector; keep below MIN_TEXT_LEN.
+MIN_USER_QUERY_LEN = 3
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 100
 
@@ -46,11 +48,35 @@ def chunk_text(text: str) -> list[tuple[int, str]]:
     return chunks
 
 
-def batch_encode(model, texts: list[str]) -> list[list[float]]:
+def _vectors_to_nested_lists(embeddings) -> list[list[float]]:
+    """Convert sentence-transformers encode output to nested Python lists.
+
+    Row-by-row ``[e.tolist() for e in embeddings]`` is very slow on large
+    matrices (e.g. 7k×384); one call to ``.tolist()`` on the full 2D array
+    (NumPy ndarray or torch tensor) is much faster. Handles 1D (single row).
+    """
+    if hasattr(embeddings, "detach"):
+        embeddings = embeddings.detach().cpu()
+    nested = embeddings.tolist()
+    if not nested:
+        return []
+    # 2D: list of rows; 1D: single vector
+    if isinstance(nested[0], (list, tuple)):
+        return [list(row) for row in nested]
+    return [nested]
+
+
+def batch_encode(model, texts: list[str], verbose: bool = False) -> list[list[float]]:
     if not texts:
         return []
-    embeddings = model.encode(texts, batch_size=BATCH_SIZE, show_progress_bar=False)
-    return [emb.tolist() for emb in embeddings]
+    embeddings = model.encode(
+        texts,
+        batch_size=BATCH_SIZE,
+        show_progress_bar=verbose,
+    )
+    if verbose:
+        print("  Converting vectors to storage format…", flush=True)
+    return _vectors_to_nested_lists(embeddings)
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +93,16 @@ def count_unembedded(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
             AND LENGTH(m.text_content) >= ?
     """, [MIN_TEXT_LEN]).fetchone()[0]
 
+    # Stripped user_query (sync populates from extract_user_query — no XML framing)
+    uq_count = con.execute("""
+        SELECT COUNT(*) FROM messages m
+        LEFT JOIN embeddings e ON e.source_type = 'message_user_query'
+            AND e.source_id = m.uuid
+        WHERE e.source_id IS NULL
+            AND m.user_query IS NOT NULL
+            AND LENGTH(TRIM(m.user_query)) >= ?
+    """, [MIN_USER_QUERY_LEN]).fetchone()[0]
+
     sess_count = con.execute("""
         SELECT COUNT(*) FROM sessions s
         LEFT JOIN embeddings e ON e.source_type = 'session'
@@ -76,10 +112,12 @@ def count_unembedded(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
             AND LENGTH(s.first_prompt) >= ?
     """, [MIN_TEXT_LEN]).fetchone()[0]
 
-    return {"message": msg_count, "session": sess_count}
+    return {"message": msg_count, "message_user_query": uq_count, "session": sess_count}
 
 
 def embed_messages(con: duckdb.DuckDBPyConnection, model, verbose: bool = False):
+    if verbose:
+        print("  Fetching messages (full text) from database…", flush=True)
     rows = con.execute("""
         SELECT m.session_id, m.uuid, m.text_content
         FROM messages m
@@ -93,24 +131,68 @@ def embed_messages(con: duckdb.DuckDBPyConnection, model, verbose: bool = False)
     if not rows:
         return 0
 
+    if verbose:
+        print(f"  Encoding {len(rows)} message texts (batch size {BATCH_SIZE})…", flush=True)
     texts = [r[2] for r in rows]
-    embeddings = batch_encode(model, texts)
+    embeddings = batch_encode(model, texts, verbose=verbose)
 
+    if verbose:
+        print("  Building insert batch…", flush=True)
     batch = []
     for (_sid, uuid, text), emb in zip(rows, embeddings):
         preview = text[:200]
         batch.append(("message", uuid, 0, "cursor", preview, emb))
+
+    if verbose:
+        print(f"  Writing {len(batch)} rows to DuckDB…", flush=True)
+    con.executemany(
+        "INSERT INTO embeddings VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+        batch,
+    )
+    if verbose:
+        print(f"  Messages (full text_content): {len(batch)} embedded")
+    return len(batch)
+
+
+def embed_message_user_queries(con: duckdb.DuckDBPyConnection, model, verbose: bool = False):
+    """Embed stripped user intent (user_query) in addition to full message embeddings."""
+    if verbose:
+        print("  Fetching user_query rows from database…", flush=True)
+    rows = con.execute("""
+        SELECT m.session_id, m.uuid, m.user_query
+        FROM messages m
+        LEFT JOIN embeddings e ON e.source_type = 'message_user_query'
+            AND e.source_id = m.uuid
+        WHERE e.source_id IS NULL
+            AND m.user_query IS NOT NULL
+            AND LENGTH(TRIM(m.user_query)) >= ?
+    """, [MIN_USER_QUERY_LEN]).fetchall()
+
+    if not rows:
+        return 0
+
+    if verbose:
+        print(f"  Encoding {len(rows)} user_query texts…", flush=True)
+    texts = [r[2].strip() for r in rows]
+    embeddings = batch_encode(model, texts, verbose=verbose)
+
+    batch = []
+    for (_sid, uuid, _), text, emb in zip(rows, texts, embeddings):
+        preview = text[:200]
+        batch.append(("message_user_query", uuid, 0, "cursor", preview, emb))
 
     con.executemany(
         "INSERT INTO embeddings VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING",
         batch,
     )
     if verbose:
-        print(f"  Messages: {len(batch)} embedded")
+        print(f"  Messages (user_query only): {len(batch)} embedded")
     return len(batch)
 
 
 def embed_sessions(con: duckdb.DuckDBPyConnection, model, verbose: bool = False):
+    if verbose:
+        print("  Fetching sessions (first_prompt) from database…", flush=True)
     rows = con.execute("""
         SELECT s.session_id, s.first_prompt
         FROM sessions s
@@ -124,8 +206,10 @@ def embed_sessions(con: duckdb.DuckDBPyConnection, model, verbose: bool = False)
     if not rows:
         return 0
 
+    if verbose:
+        print(f"  Encoding {len(rows)} session prompts…", flush=True)
     texts = [r[1] for r in rows]
-    embeddings = batch_encode(model, texts)
+    embeddings = batch_encode(model, texts, verbose=verbose)
 
     batch = []
     for (sid, text), emb in zip(rows, embeddings):
@@ -231,7 +315,11 @@ def main():
     total_work = sum(counts.values()) + stale
 
     if args.verbose:
-        print(f"Unembedded: {counts['message']} msgs, {counts['session']} sessions")
+        print(
+            f"Unembedded: {counts['message']} msgs (full), "
+            f"{counts['message_user_query']} msgs (user_query), "
+            f"{counts['session']} sessions"
+        )
 
     if total_work == 0 and not args.full:
         if args.verbose:
@@ -247,9 +335,10 @@ def main():
         counts = count_unembedded(con)
 
     n_msg = embed_messages(con, model, args.verbose)
+    n_uq = embed_message_user_queries(con, model, args.verbose)
     n_sess = embed_sessions(con, model, args.verbose)
 
-    total = n_msg + n_sess
+    total = n_msg + n_uq + n_sess
     if total > 0 or stale > 0:
         rebuild_hnsw(con, args.verbose)
 

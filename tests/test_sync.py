@@ -990,7 +990,7 @@ class TestEmbedUserQuery:
         fp = FIXTURES_DIR / "cursor_session.jsonl"
         sync._ingest_jsonl(db, fp, session_id="dual-embed-session")
 
-        def fake_batch_encode(model, texts):
+        def fake_batch_encode(model, texts, verbose=False):
             return [[float(i % 11) / 100.0] * 384 for i in range(len(texts))]
 
         monkeypatch.setattr(embed, "batch_encode", fake_batch_encode)

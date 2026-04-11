@@ -65,8 +65,11 @@ def search(con: duckdb.DuckDBPyConnection, query_embedding: list[float],
     if source_type:
         filters.append("e.source_type = ?")
         params.append(source_type)
+    else:
+        # Avoid duplicate hits for the same logical message (full text vs user_query-only).
+        filters.append("e.source_type IN ('message', 'session')")
 
-    where = ("AND " + " AND ".join(filters)) if filters else ""
+    where = "AND " + " AND ".join(filters)
 
     rows = con.execute(f"""
         SELECT
@@ -108,7 +111,7 @@ def search(con: duckdb.DuckDBPyConnection, query_embedding: list[float],
 
 
 def enrich(con: duckdb.DuckDBPyConnection, source_type: str, source_id: str) -> dict:
-    if source_type == "message":
+    if source_type in ("message", "message_user_query"):
         parts = source_id.split(":", 1)
         if len(parts) == 2:
             sid = parts[0]
@@ -136,7 +139,12 @@ def main():
     parser.add_argument("query", help="Search query (semantic)")
     parser.add_argument("--project", "-p", help="Filter by project name")
     parser.add_argument("--days", "-d", type=int, help="Limit to last N days")
-    parser.add_argument("--type", "-t", choices=["message", "session"], help="Filter by source type")
+    parser.add_argument(
+        "--type",
+        "-t",
+        choices=["message", "session", "message_user_query"],
+        help="Filter by source type (default search: message + session only)",
+    )
     parser.add_argument("--limit", "-n", type=int, default=10, help="Max results (default: 10)")
     parser.add_argument("--db", default=str(DB_PATH))
     args = parser.parse_args()

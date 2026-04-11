@@ -40,7 +40,7 @@ uv run --script "$PLUGIN_SCRIPTS/query.py" search "$ARGUMENTS"
 ```bash
 uv run --script "$PLUGIN_SCRIPTS/vsearch.py" "$ARGUMENTS"
 ```
-Finds results even when exact words don't match. Supports filters: `--project X`, `--days N`, `--type message|session`, `--limit N`.
+Finds results even when exact words don't match. Supports filters: `--project X`, `--days N`, `--type message|session|message_user_query`, `--limit N`. Omitting `--type` searches full message text and sessions, not `message_user_query` (avoids duplicate hits per turn).
 
 ## Interpreting results
 

@@ -30,6 +30,10 @@ Native Windows and macOS are expected to work (all paths use `~/.cursor/`) but h
 
 Requires [uv](https://docs.astral.sh/uv/) (Python package runner).
 
+**First-time setup:** After installing the plugin, run the **`cw:initialize`** skill (or follow [`skills/cw-initialize/SKILL.md`](skills/cw-initialize/SKILL.md)). It checks prerequisites, optionally configures user-level **`uv`** for PyTorch (with your permission), runs a **one-time full sync** and **one-time embed**, and can start the dashboard. That order avoids “empty warehouse” surprises and GPU/`torch` footguns.
+
+Manual equivalents (if you already know what you’re doing):
+
 ```bash
 # Sync your Cursor sessions into DuckDB
 uv run --script scripts/sync.py -v
@@ -44,12 +48,41 @@ uv run --script scripts/query.py search "authentication"
 uv run --script scripts/dashboard.py
 # Open http://127.0.0.1:3141
 
-# Generate embeddings for semantic search
+# Generate embeddings for semantic search (full message text + stripped user_query per message)
 uv run --script scripts/embed.py -v
 
-# Semantic search
+# Semantic search (default: full messages + sessions; add -t message_user_query for user-intent-only vectors)
 uv run --script scripts/vsearch.py "how to handle JWT tokens"
 ```
+
+### Embeddings and PyTorch (`embed.py`)
+
+`embed.py` pulls **`torch`** (and **`sentence-transformers`**) via PEP 723. PyTorch’s CUDA wheels are published on **`download.pytorch.org`**, not only on PyPI, so **`uv`** needs an extra index for a typical **Linux + NVIDIA** setup.
+
+**User-level config** (recommended; no `pyproject.toml` required):
+
+| OS | Path |
+|----|------|
+| Linux / macOS | `~/.config/uv/uv.toml` |
+| Windows | `%APPDATA%\uv\uv.toml` |
+
+Example — **CUDA 12.6** wheels (adjust `cu126` to match [PyTorch’s install matrix](https://pytorch.org/get-started/locally/) and your driver):
+
+```toml
+[[index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+```
+
+PyPI remains the default index for everything else (`duckdb`, `sentence-transformers`, …). **Apple Silicon** and **CPU-only** users should use the **macOS** or **CPU** line from the same matrix instead of a `cu*` URL.
+
+**Optional smoke test** (prints `torch` version and whether CUDA is available):
+
+```bash
+uv run --script scripts/uv_torch_smoke.py
+```
+
+If **`uv`** fails while installing NVIDIA-related wheels with **`The wheel is invalid`** / **`Metadata field Name not found`**, run **`uv cache clean`** and **`uv self update`**, then retry (stale cache is a common cause).
 
 ## Schema
 
@@ -61,7 +94,7 @@ All provenance tables include a `harness` column (defaults to `'cursor'`) for fu
 | `messages` | Individual turns from JSONL transcripts |
 | `tool_calls` | Extracted tool invocations (Read, Write, Shell, etc.) |
 | `scored_commits` | Commit-level AI attribution (tab/composer/human lines) |
-| `embeddings` | Vector embeddings for semantic search |
+| `embeddings` | Vectors for semantic search (`message`, `message_user_query`, `session`) |
 | `_sync_state` | Watermarks for incremental sync |
 
 ## Installation

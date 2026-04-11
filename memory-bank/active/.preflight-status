@@ -1,4 +1,9 @@
 PASS
-task: visiona-pr-rework
-date: 2026-04-10
-findings: 0 blocking, 2 advisory
+
+Preflight run: 2026-04-11 (revised x2 after operator feedback)
+Task: visiona-pr-rework (Round 2)
+
+Findings:
+1. [RESOLVED] RW1 approach revised x2: filesystem reconstruction replaces container-dir heuristic. Greedy left-to-right is_dir() walk resolves slug ambiguity using ground truth. Culturally neutral. Fallback to parts[-1] when path doesn't exist (no worse than current).
+2. [RESOLVED] Lazy import of parsedate_to_datetime added to RW4 scope.
+3. [ADVISORY] Filesystem reconstruction fails when original path is deleted/moved/on different machine. Fallback to parts[-1] is same as current behavior — strictly no worse.
