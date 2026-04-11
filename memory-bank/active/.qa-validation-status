@@ -1,4 +1,18 @@
-PASS
-task: visiona-pr-rework
-date: 2026-04-10
-findings: 1 trivial (fixed)
+# QA Validation — visiona-pr-rework Round 3
+
+**Date:** 2026-04-11  
+**Result:** PASS
+
+## Scope
+
+Round 3 peer review: RW8 (chunk + mean-pool embeddings), RW9 (mtime + path watermark), RW10 (narrow `_ingest_jsonl` exception handling).
+
+## Verification
+
+- Full suite: `uv run --with pytest --with duckdb pytest tests/ -v` — **92 passed**
+- Semantic review: plan requirements implemented; tests cover RW8–RW10; no blocking TODOs or debug debris in changed paths
+- Documentation: `memory-bank/systemPatterns.md` updated for watermark tiebreaker and embedding aggregation (was stale vs implementation)
+
+## Corrections applied during QA
+
+- Updated persistent architecture doc (`systemPatterns.md`) to match Round 3 behavior

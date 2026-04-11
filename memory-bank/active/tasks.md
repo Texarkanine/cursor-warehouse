@@ -106,7 +106,7 @@ _(None — reserve for rejected peer-review items.)_
 - [x] Implementation plan
 - [ ] Preflight (Round 3 — optional; plan was pre-approved in session)
 - [x] Build (RW10 → RW9 → RW8; 92 tests passing)
-- [ ] QA
+- [x] QA (PASS — 2026-04-11; see `memory-bank/active/.qa-validation-status`; `systemPatterns.md` synced to RW8/RW9)
 
 ---
 

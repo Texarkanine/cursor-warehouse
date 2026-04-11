@@ -16,7 +16,11 @@ All provenance tables (`sessions`, `messages`, `tool_calls`, `embeddings`, `scor
 
 ## Watermark-Based Incremental Sync
 
-The `_sync_state` table tracks file mtimes per source category. On each sync run, only files with mtimes newer than the stored watermark are processed. Dedup within a session is handled by delete-and-reinsert.
+The `_sync_state` table stores `(last_mtime, last_path)` per source category (`sessions`, `subagents`). A file is eligible if its mtime is greater than `last_mtime`, or if mtime equals `last_mtime` and its resolved path string is lexicographically greater than `last_path` (stable ordering uses `(mtime, resolved path)`). Dedup within a session is handled by delete-and-reinsert.
+
+## Embeddings and long text
+
+`embed.py` splits text longer than `CHUNK_SIZE` into overlapping chunks, runs `SentenceTransformer.encode` on chunks in batch, then **mean-pools** chunk vectors into one embedding per logical document (still stored at `chunk_idx = 0`).
 
 ## Fork-and-Return Hook Architecture
 
