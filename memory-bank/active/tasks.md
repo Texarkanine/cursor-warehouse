@@ -107,6 +107,7 @@ _(None — reserve for rejected peer-review items.)_
 - [ ] Preflight (Round 3 — optional; plan was pre-approved in session)
 - [x] Build (RW10 → RW9 → RW8; 92 tests passing)
 - [x] QA (PASS — 2026-04-11; see `memory-bank/active/.qa-validation-status`; `systemPatterns.md` synced to RW8/RW9)
+- [x] Reflect (2026-04-11 — `reflection-visiona-pr-rework.md` covers Rounds 1–3)
 
 ---
 
@@ -307,4 +308,4 @@ No new technology — all fixes use existing Python stdlib and JavaScript APIs.
 - [x] Build
 - [ ] QA — may complete under Round 2 closure or fold into Round 3 QA gate
 
-**Active work:** Round 3 (peer PR review) at the top of this file.
+**Active work:** Round 3 complete — Reflect done; ready for `/niko-archive`.
