@@ -6,9 +6,12 @@ from pathlib import Path
 import duckdb
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+sys.path.insert(0, str(SCRIPTS_DIR))
 
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "scripts" / "schema.sql"
+from schema_util import ensure_sync_state_last_path  # noqa: E402
+
+SCHEMA_PATH = SCRIPTS_DIR / "schema.sql"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
@@ -17,6 +20,7 @@ def db():
     """In-memory DuckDB connection with schema applied."""
     con = duckdb.connect(":memory:")
     con.execute(SCHEMA_PATH.read_text())
+    ensure_sync_state_last_path(con)
     yield con
     con.close()
 
@@ -27,5 +31,6 @@ def db_path(tmp_path):
     p = tmp_path / "test.duckdb"
     con = duckdb.connect(str(p))
     con.execute(SCHEMA_PATH.read_text())
+    ensure_sync_state_last_path(con)
     yield str(p), con
     con.close()

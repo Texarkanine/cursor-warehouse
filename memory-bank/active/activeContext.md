@@ -2,17 +2,17 @@
 
 ## Current Task
 
-cursor-warehouse PR #1 Rework (Round 2)
+cursor-warehouse PR #1 Rework — **Round 3** (peer PR review, post-reflect)
 
 ## Phase
 
-BUILD - COMPLETE
+BUILD — COMPLETE (Round 3 RW8–RW10)
 
 ## What Was Done
 
-- Implemented RW1–RW7 from the preflight-approved plan: `scripts/sync.py` (filesystem reconstruction for workspace slugs with `_RECONSTRUCTION_ROOTS` + WSL `/mnt/<drive>/`, `lru_cache` on `_derive_project_name`, deterministic `min(model)` per conversation, UTF-8 JSONL reads, ISO 8601 in `_parse_tracking_timestamp` with `parsedate_to_datetime` at top level), `static/index.html` (local calendar dates for daily/weekly chart labels), `skills/cw-report` and `skills/cw-wrapped` (query examples use `uv run --script "$QUERY_SCRIPT"`).
-- Tests: extended `tests/test_sync.py` with RW1 reconstruction/fallback/WSL cases, RW2 deterministic model enrichment, RW4 timestamp parsing, RW6 `tmp_path` for long-text truncation; full suite **83** tests passing.
+- **Round 2 (delivered):** RW1–RW7 per preflight-approved plan (`scripts/sync.py`, `static/index.html`, `tests/test_sync.py`, `skills/cw-report`, `skills/cw-wrapped`). Full suite **83** tests at build completion.
+- **Round 3 — build:** **RW10** — `_ingest_jsonl` catches only `OSError` on open; parse loop no longer wrapped in `except Exception`. **RW9** — `_sync_state.last_path`, `get_watermark` → `(mtime, path)`, `_file_newer_than_watermark`, `_scan_jsonl_files` 4-arg watermarks, `set_watermark` + lexicographic `max` in `sync_sessions`/`sync_subagents`; `schema.sql` + `scripts/schema_util.ensure_sync_state_last_path` (called from `sync`/`embed` `init_db` and `conftest`). **RW8** — `batch_encode_documents` + `_mean_pool_vectors`, `chunk_text` wired for all `embed_*` paths; `_vectors_to_nested_lists` accepts plain nested lists for tests. **Tests:** `tests/test_embed.py`, schema migration + `last_path` column tests, discovery + ingest propagation tests. **Verification:** **92** `pytest` tests passed.
 
 ## Next Step
 
-Run `/niko-qa` for semantic QA review.
+Run `/niko-qa` for Round 3 semantic review.

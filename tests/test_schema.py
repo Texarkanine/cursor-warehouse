@@ -40,6 +40,11 @@ class TestSchemaCreation:
         result = db.execute("SELECT 1").fetchone()
         assert result == (1,)
 
+    def test_sync_state_has_last_path_column(self, db):
+        """Incremental sync tiebreaker (Round 3 RW9)."""
+        cols = _get_columns(db, "_sync_state")
+        assert "last_path" in cols
+
     def test_expected_tables_exist(self, db):
         tables = _get_tables(db)
         for t in EXPECTED_TABLES:
@@ -104,3 +109,18 @@ class TestSchemaIdempotency:
         tables = _get_tables(db)
         for t in EXPECTED_TABLES:
             assert t in tables
+
+
+class TestSyncStateMigration:
+    def test_migrate_adds_last_path_to_legacy_sync_state(self):
+        """Older DBs without last_path get the column via ensure_sync_state_last_path."""
+        from schema_util import ensure_sync_state_last_path
+
+        con = duckdb.connect(":memory:")
+        con.execute(
+            "CREATE TABLE _sync_state (source_name VARCHAR PRIMARY KEY, last_mtime DOUBLE)"
+        )
+        ensure_sync_state_last_path(con)
+        cols = _get_columns(con, "_sync_state")
+        assert "last_path" in cols
+        con.close()

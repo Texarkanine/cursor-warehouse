@@ -18,6 +18,8 @@ from pathlib import Path
 
 import duckdb
 
+from schema_util import ensure_sync_state_last_path
+
 CURSOR_DIR = Path.home() / ".cursor"
 
 # Roots for workspace-slug → filesystem path reconstruction (monkeypatch in tests).
@@ -28,25 +30,46 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 def init_db(con: duckdb.DuckDBPyConnection):
     con.execute(SCHEMA_PATH.read_text())
+    ensure_sync_state_last_path(con)
 
 
-def get_watermark(con: duckdb.DuckDBPyConnection, source: str) -> float:
+def get_watermark(con: duckdb.DuckDBPyConnection, source: str) -> tuple[float, str]:
+    """Return (last_mtime, last_path) for incremental sync tie-breaking."""
     r = con.execute(
-        "SELECT last_mtime FROM _sync_state WHERE source_name = ?", [source]
+        "SELECT last_mtime, COALESCE(last_path, '') FROM _sync_state WHERE source_name = ?",
+        [source],
     ).fetchone()
-    return r[0] if r else 0.0
+    return (r[0], r[1]) if r else (0.0, "")
 
 
-def set_watermark(con: duckdb.DuckDBPyConnection, source: str, mtime: float, files: int, rows: int):
+def set_watermark(
+    con: duckdb.DuckDBPyConnection,
+    source: str,
+    mtime: float,
+    last_path: str,
+    files: int,
+    rows: int,
+):
     con.execute("""
-        INSERT INTO _sync_state (source_name, last_mtime, last_run, files_synced, rows_synced)
-        VALUES (?, ?, current_timestamp, ?, ?)
+        INSERT INTO _sync_state (source_name, last_mtime, last_path, last_run, files_synced, rows_synced)
+        VALUES (?, ?, ?, current_timestamp, ?, ?)
         ON CONFLICT (source_name)
         DO UPDATE SET last_mtime = excluded.last_mtime,
+                      last_path = excluded.last_path,
                       last_run = excluded.last_run,
                       files_synced = _sync_state.files_synced + excluded.files_synced,
                       rows_synced = _sync_state.rows_synced + excluded.rows_synced
-    """, [source, mtime, files, rows])
+    """, [source, mtime, last_path, files, rows])
+
+
+def _file_newer_than_watermark(mtime: float, fp: Path, wm_m: float, wm_p: str) -> bool:
+    """True if fp should be synced: mtime > wm, or same mtime and path lexically after wm path."""
+    p = str(fp.resolve())
+    if mtime > wm_m:
+        return True
+    if mtime < wm_m:
+        return False
+    return p > wm_p
 
 
 def truncate(s: str | None, maxlen: int = 500) -> str | None:
@@ -216,78 +239,82 @@ def _ingest_jsonl(con: duckdb.DuckDBPyConnection, fp: Path, session_id: str,
     models_seen = set()
 
     try:
-        with open(fp, encoding="utf-8", errors="replace") as f:
-            for line_idx, line in enumerate(f):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                # Format contract: embed.py source_id and vsearch.py enrichment
-                # both rely on uuid being '{session_id}:{line_idx}'.
-                msg_uuid = f"{session_id}:{line_idx}"
-                msg_payload = rec.get("message", {})
-                if not isinstance(msg_payload, dict):
-                    continue
-
-                role = rec.get("role") or msg_payload.get("role")
-                msg_type = role or ""
-                content = msg_payload.get("content", [])
-                model = msg_payload.get("model")
-
-                if model:
-                    models_seen.add(model)
-
-                content_types = []
-                tool_name = None
-                text_content = None
-
-                if isinstance(content, list):
-                    for i, block in enumerate(content):
-                        if not isinstance(block, dict):
-                            continue
-                        bt = block.get("type", "")
-                        if bt and bt not in content_types:
-                            content_types.append(bt)
-
-                        if bt == "tool_use":
-                            tn = block.get("name", "")
-                            tools_seen.add(tn)
-                            if not tool_name:
-                                tool_name = tn
-
-                            tool_calls_batch.append((
-                                session_id, msg_uuid, i,
-                                tn,
-                                truncate(json.dumps(block.get("input", {}), default=str), 500),
-                                None,  # timestamp
-                            ))
-
-                text_content = extract_text_content(content)
-
-                user_query = None
-                if msg_type == "user" and text_content:
-                    user_query = truncate(extract_user_query(text_content), 2000)
-
-                if msg_type == "user" and first_user_prompt is None:
-                    first_user_prompt = extract_first_prompt(content)
-
-                messages.append((
-                    session_id, msg_uuid,
-                    msg_type,
-                    None,  # timestamp
-                    role, model,
-                    json.dumps(content_types) if content_types else None,
-                    tool_name,
-                    truncate(text_content, 2000),
-                    user_query,
-                ))
-    except Exception as e:
+        f = open(fp, encoding="utf-8", errors="replace")
+    except OSError as e:
         print(f"[sync] Skipping {fp}: {type(e).__name__}: {e}", file=sys.stderr)
         return None
+
+    try:
+        for line_idx, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            # Format contract: embed.py source_id and vsearch.py enrichment
+            # both rely on uuid being '{session_id}:{line_idx}'.
+            msg_uuid = f"{session_id}:{line_idx}"
+            msg_payload = rec.get("message", {})
+            if not isinstance(msg_payload, dict):
+                continue
+
+            role = rec.get("role") or msg_payload.get("role")
+            msg_type = role or ""
+            content = msg_payload.get("content", [])
+            model = msg_payload.get("model")
+
+            if model:
+                models_seen.add(model)
+
+            content_types = []
+            tool_name = None
+            text_content = None
+
+            if isinstance(content, list):
+                for i, block in enumerate(content):
+                    if not isinstance(block, dict):
+                        continue
+                    bt = block.get("type", "")
+                    if bt and bt not in content_types:
+                        content_types.append(bt)
+
+                    if bt == "tool_use":
+                        tn = block.get("name", "")
+                        tools_seen.add(tn)
+                        if not tool_name:
+                            tool_name = tn
+
+                        tool_calls_batch.append((
+                            session_id, msg_uuid, i,
+                            tn,
+                            truncate(json.dumps(block.get("input", {}), default=str), 500),
+                            None,  # timestamp
+                        ))
+
+            text_content = extract_text_content(content)
+
+            user_query = None
+            if msg_type == "user" and text_content:
+                user_query = truncate(extract_user_query(text_content), 2000)
+
+            if msg_type == "user" and first_user_prompt is None:
+                first_user_prompt = extract_first_prompt(content)
+
+            messages.append((
+                session_id, msg_uuid,
+                msg_type,
+                None,  # timestamp
+                role, model,
+                json.dumps(content_types) if content_types else None,
+                tool_name,
+                truncate(text_content, 2000),
+                user_query,
+            ))
+    finally:
+        f.close()
 
     if not messages:
         return None
@@ -356,8 +383,17 @@ def _ingest_jsonl(con: duckdb.DuckDBPyConnection, fp: Path, session_id: str,
     return session_id, len(messages)
 
 
-def _scan_jsonl_files(projects_dir: Path, session_wm: float, subagent_wm: float):
-    """Single rglob scan partitioned into sessions and subagents."""
+def _scan_jsonl_files(
+    projects_dir: Path,
+    session_wm: float,
+    session_wp: str,
+    subagent_wm: float,
+    subagent_wp: str,
+):
+    """Single rglob scan partitioned into sessions and subagents.
+
+    Watermarks are (mtime, path): include file if mtime > wm, or mtime == wm and path > last_path.
+    """
     sessions = []
     subagents = []
 
@@ -376,34 +412,34 @@ def _scan_jsonl_files(projects_dir: Path, session_wm: float, subagent_wm: float)
                 continue
             mtime = p.stat().st_mtime
             is_sub = "/subagents/" in str(p) or "\\subagents\\" in str(p)
-            if is_sub and mtime > subagent_wm:
+            if is_sub and _file_newer_than_watermark(mtime, p, subagent_wm, subagent_wp):
                 subagents.append((mtime, p))
-            elif not is_sub and mtime > session_wm:
+            elif not is_sub and _file_newer_than_watermark(mtime, p, session_wm, session_wp):
                 sessions.append((mtime, p))
 
-    sessions.sort(key=lambda x: x[0])
-    subagents.sort(key=lambda x: x[0])
+    sessions.sort(key=lambda x: (x[0], str(x[1].resolve())))
+    subagents.sort(key=lambda x: (x[0], str(x[1].resolve())))
     return sessions, subagents
 
 
 def sync_sessions(con: duckdb.DuckDBPyConnection, session_files: list[tuple[float, Path]],
                   verbose: bool = False):
-    wm = get_watermark(con, "sessions")
+    wm_m, wm_p = get_watermark(con, "sessions")
 
     if verbose:
         print(f"  Sessions: {len(session_files)} files to process")
 
-    max_mtime = wm
+    max_key = (wm_m, wm_p)
     total_rows = 0
 
     for mtime, fp in session_files:
-        max_mtime = max(max_mtime, mtime)
+        max_key = max(max_key, (mtime, str(fp.resolve())))
         session_id = fp.stem
         result = _ingest_jsonl(con, fp, session_id=session_id, is_subagent=False)
         if result:
             total_rows += result[1]
 
-    set_watermark(con, "sessions", max_mtime, len(session_files), total_rows)
+    set_watermark(con, "sessions", max_key[0], max_key[1], len(session_files), total_rows)
 
 
 def sync_subagents(con: duckdb.DuckDBPyConnection, subagent_files: list[tuple[float, Path]],
@@ -411,12 +447,12 @@ def sync_subagents(con: duckdb.DuckDBPyConnection, subagent_files: list[tuple[fl
     if verbose:
         print(f"  Subagents: {len(subagent_files)} files to process")
 
-    wm = get_watermark(con, "subagents")
-    max_mtime = wm
+    wm_m, wm_p = get_watermark(con, "subagents")
+    max_key = (wm_m, wm_p)
     total_rows = 0
 
     for mtime, fp in subagent_files:
-        max_mtime = max(max_mtime, mtime)
+        max_key = max(max_key, (mtime, str(fp.resolve())))
         subagent_id = fp.stem
 
         # Derive parent session ID from path structure
@@ -431,14 +467,16 @@ def sync_subagents(con: duckdb.DuckDBPyConnection, subagent_files: list[tuple[fl
         if result:
             total_rows += result[1]
 
-    set_watermark(con, "subagents", max_mtime, len(subagent_files), total_rows)
+    set_watermark(con, "subagents", max_key[0], max_key[1], len(subagent_files), total_rows)
 
 
 def sync_all(con: duckdb.DuckDBPyConnection, projects_dir: Path, verbose: bool = False):
     """Run the full sync pipeline against a projects directory."""
-    session_wm = get_watermark(con, "sessions")
-    subagent_wm = get_watermark(con, "subagents")
-    session_files, subagent_files = _scan_jsonl_files(projects_dir, session_wm, subagent_wm)
+    session_wm_m, session_wp = get_watermark(con, "sessions")
+    subagent_wm_m, subagent_wp = get_watermark(con, "subagents")
+    session_files, subagent_files = _scan_jsonl_files(
+        projects_dir, session_wm_m, session_wp, subagent_wm_m, subagent_wp
+    )
 
     sync_sessions(con, session_files, verbose=verbose)
     sync_subagents(con, subagent_files, verbose=verbose)

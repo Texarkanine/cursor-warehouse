@@ -1,12 +1,122 @@
-# Task: cursor-warehouse PR #1 Rework (Round 2)
+# Task: cursor-warehouse PR #1 Rework
 
-* Task ID: visiona-pr-rework
-* Complexity: Level 3
-* Type: fix (rework from PR review feedback, round 2)
+**Task ID:** visiona-pr-rework  
+**Complexity:** Level 3  
+**Type:** fix (PR review feedback — multiple rounds, including peer review after reflect)
 
-Address valid findings from second round of PR review feedback on [PR #1](https://github.com/Texarkanine/cursor-warehouse/pull/1). This is a low-complexity "direct port" — we want equivalent, not-incorrect functionality with no data omissions, not a new product.
+Upstream: [PR #1](https://github.com/Texarkanine/cursor-warehouse/pull/1). **Round 2** (RW1–RW7) is built and delivered. **Round 3** records post-reflect **peer PR review** findings. Same bar: direct port, no silent data loss, correct incremental sync, embeddings that match stated behavior.
 
-## PR Feedback Triage (Round 2)
+---
+
+## Round 3 — Peer PR review (ACTIVE)
+
+### PR Feedback Triage (Round 3)
+
+#### VALID AND WORTH REWORKING
+
+##### RW8. scripts/embed.py: Long inputs truncated; `chunk_text` unused (approx. lines 37–48, 69–224)
+
+**Source:** PR reviewer (inline)  
+**Justification:** Verified. `chunk_text()` splits long text into `CHUNK_SIZE`/`CHUNK_OVERLAP` pieces but **is not used** by `embed_messages`, `embed_message_user_queries`, or `embed_sessions`. Those pass full strings to `batch_encode` → `SentenceTransformer.encode`, so content beyond the model’s effective window is not represented; truncation is implicit.  
+**Approach:** Use `chunk_text(text)` for texts longer than one chunk. Extend encoding so each logical document yields **one** vector: e.g. encode all chunks in batch(es), then **aggregate per document** (mean pool of chunk vectors, or mean of L2-normalized chunk vectors — pick one and document). Update `batch_encode` (or a dedicated helper) to accept **list-of-chunks per row**, call `encode` on the flat chunk list with a document index map, then reduce to one `list[float]` per source. Keep `PRIMARY KEY (source_type, source_id, chunk_idx)` — aggregated pipeline can continue storing `chunk_idx = 0` unless product later wants multiple rows per message. Coordinate `chunk_text`, batching, and the three `embed_*` functions.
+
+##### RW9. scripts/sync.py: Watermark is mtime-only — unsafe tiebreaker (approx. lines 33–49, 359–386)
+
+**Source:** PR reviewer (inline)  
+**Justification:** Verified. `get_watermark` / `set_watermark` persist only `last_mtime`. `_scan_jsonl_files` selects files with `mtime > watermark` and sorts by `mtime` only. Files with `st_mtime == last_mtime` are never picked again; a **new** file can share the same mtime as the current watermark and be skipped forever. Deterministic ordering requires a tiebreaker: e.g. `(st_mtime > last_mtime) OR (st_mtime == last_mtime AND path_str > last_path)`.  
+**Approach:** Add `last_path VARCHAR` (or similar) to `_sync_state` in `schema.sql` + idempotent `ALTER`/init for existing DBs. Extend `set_watermark` to store the **last processed** `(mtime, path)` lexicographic max among the batch (or cumulative max — align with scan order). Update `get_watermark` to return both. Update scan filter and **sort** to `(mtime, path)` for stable ordering. Apply to **sessions** and **subagents** sources (two rows in `_sync_state`) — both call sites referenced in review.
+
+##### RW10. scripts/sync.py: `_ingest_jsonl` outer `except Exception` masks bugs (approx. lines 218–290)
+
+**Source:** PR reviewer (inline)  
+**Justification:** Verified. A single `try` wraps file open, line loop, and all per-record logic; `except Exception` logs and returns `None`, so programming errors (`TypeError`, `KeyError`, etc.) are indistinguishable from ingest skips and do not fail tests or CI.  
+**Approach:** Catch only **expected I/O errors** (`OSError`, `FileNotFoundError`, or a tuple thereof) around **opening/reading** the file. Keep per-line `json.loads` handling as today (`JSONDecodeError` → continue). **Do not** wrap the entire parse loop in `except Exception` — let unexpected exceptions propagate (optionally log + re-raise in verbose mode only if desired; default propagate).
+
+#### NOT VALID (Round 3)
+
+_(None — reserve for rejected peer-review items.)_
+
+### Component Analysis (Round 3)
+
+#### Affected components
+
+- **`scripts/embed.py`:** Chunking, per-document aggregation, `batch_encode` / `embed_*` coordination.
+- **`scripts/schema.sql`:** `_sync_state` — add tiebreaker column; document in `systemPatterns.md` if needed (user asked not to expand markdown scope — only update memory-bank task docs here).
+- **`scripts/sync.py`:** Watermark I/O, `_scan_jsonl_files`, `sync_sessions` / `sync_subagents`, `_ingest_jsonl` exception structure.
+- **`tests/test_sync.py` / `tests/test_embed.py` (if present):** New or extended tests for RW9–RW10; RW8 tests colocated with embed tests.
+
+#### Cross-module dependencies
+
+- **query.py / dashboard.py:** Any `SELECT * FROM _sync_state` may need review if column order assumed; prefer explicit column lists (additive column is safe for named selects).
+- **embeddings table:** RW8 does not require a new column if one aggregated vector per `(source_type, source_id)` at `chunk_idx = 0`.
+
+#### Boundary changes
+
+- **RW9:** Schema change — backward-compatible migration for existing DuckDB files (add column with default `''` or `NULL` + scan logic treating missing as empty string for path comparison).
+
+#### Invariants & constraints (Round 3)
+
+1. Full `pytest` suite passes after each phase.
+2. Prefer no new Python dependencies; RW8 uses existing `sentence-transformers` / `torch` stack.
+3. Re-embed or `--full` embed may be required after RW8 for semantic consistency — document in commit/PR notes.
+
+### Open questions (Round 3)
+
+1. **RW8 — aggregation:** Default to **element-wise mean** of chunk embedding vectors, then optional **L2 normalize** once for cosine consistency with single-chunk path — confirm with one golden test vector pair.
+2. **RW9 — path encoding:** Store `str(Path.resolve())` or POSIX `as_posix()` for stable cross-platform ordering in tests.
+
+### Test plan (Round 3) — TDD
+
+**RW8**
+
+- Short text (≤ `CHUNK_SIZE`): single chunk; embedding shape `[384]`; behavior matches pre-change within float tolerance (or same mock).
+- Long text: more than one chunk; aggregated vector ≠ first chunk only (regression guard).
+- Empty chunk list: should not occur if `MIN_TEXT_LEN` gates stand — document.
+
+**RW9**
+
+- Controlled `tmp_path` tree: two JSONL files **same mtime**, different paths; watermark advances so the lexicographically later file is not permanently skipped after a partial boundary.
+- New file with mtime **equal** to stored `last_mtime` but path **greater** than `last_path` is included.
+- Migration: DB without `last_path` column upgraded on `init_db` / connect path.
+
+**RW10**
+
+- `json.loads` invalid line: still skipped (line-level).
+- Simulated `RuntimeError` inside post-parse processing: propagates out of `_ingest_jsonl` (pytest `raises`).
+- Missing file: `OSError` / `FileNotFoundError` handled at open without masking other errors.
+
+### Implementation plan (Round 3)
+
+1. **Tests first (stubs → failing → pass):** Add tests for RW8, RW9, RW10 per above.
+2. **RW10:** Refactor `_ingest_jsonl` exception boundaries (smallest diff, sync-only).
+3. **RW9:** Schema + migration helpers; watermark read/write; scan/sort/predicate for sessions + subagents.
+4. **RW8:** Implement chunk batching + aggregation; wire three `embed_*` pipelines.
+5. **Verification:** `uv run --with pytest --with duckdb pytest tests/ -v` (full suite); optional manual `--full` embed smoke.
+
+### Challenges & mitigations (Round 3)
+
+- **RW8 runtime:** More `encode` calls for long docs — acceptable for local batch; batch chunk lists to preserve `BATCH_SIZE` efficiency.
+- **RW9 migration:** DuckDB `ALTER TABLE ... ADD COLUMN` — run from `init_db` in sync (and embed if schema shared) idempotently.
+
+### Status (Round 3)
+
+- [x] PR feedback triage (3 valid: RW8–RW10)
+- [x] Component analysis
+- [x] Test planning (TDD)
+- [x] Implementation plan
+- [ ] Preflight (Round 3 — optional; plan was pre-approved in session)
+- [x] Build (RW10 → RW9 → RW8; 92 tests passing)
+- [ ] QA
+
+---
+
+## Round 2 — Completed (2026-04-11)
+
+### Delivered summary
+
+RW1–RW7 implemented; 83 tests passing at build completion. Detail: workspace slug reconstruction, deterministic model enrichment, UTF-8 JSONL, ISO timestamps, dashboard date labels, `tmp_path` long-text test, SKILL query examples.
+
+### PR Feedback Triage (Round 2) — reference
 
 ### VALID AND WORTH REWORKING
 
@@ -185,7 +295,7 @@ No new technology — all fixes use existing Python stdlib and JavaScript APIs.
 - **RW4 (fromisoformat compatibility):** `datetime.fromisoformat()` in Python 3.11+ handles most ISO 8601 formats including the `Z` suffix. Since PEP 723 already specifies `requires-python = ">=3.11"`, this is safe.
 - **RW2 (min model semantics):** `min(model)` picks the lexicographically smallest model string. This is arbitrary but deterministic, which is the goal. The display layer (R9) already uses `STRING_AGG(DISTINCT model, ', ')` for accurate multi-model display.
 
-## Status
+## Status (Round 2 — reference)
 
 - [x] PR feedback triage complete (7 valid, 3 rejected)
 - [x] Component analysis complete
@@ -195,4 +305,6 @@ No new technology — all fixes use existing Python stdlib and JavaScript APIs.
 - [x] Technology validation complete (no new tech)
 - [x] Preflight (PASS — revised: container-dir heuristic for RW1, lazy import fix added to RW4)
 - [x] Build
-- [ ] QA
+- [ ] QA — may complete under Round 2 closure or fold into Round 3 QA gate
+
+**Active work:** Round 3 (peer PR review) at the top of this file.

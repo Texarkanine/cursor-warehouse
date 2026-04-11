@@ -282,6 +282,20 @@ class TestIngestJsonl:
         captured = capsys.readouterr()
         assert "no_such_file" in captured.err
 
+    def test_ingest_propagates_unexpected_exception(self, db, tmp_path, monkeypatch):
+        """Programming errors in the parse loop are not swallowed by a broad except."""
+        import sync
+
+        fp = tmp_path / "boom.jsonl"
+        fp.write_text('{"role":"user","message":{"role":"user","content":[]}}\n')
+
+        def boom(*_a, **_k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(sync, "extract_text_content", boom)
+        with pytest.raises(RuntimeError, match="boom"):
+            sync._ingest_jsonl(db, fp, session_id="boom-session")
+
 
 # ---------------------------------------------------------------------------
 # User Query Extraction Tests
@@ -437,7 +451,7 @@ class TestDiscovery:
         session_dir = _make_session_dir(projects_dir, "my-workspace", "session-aaa")
         _copy_fixture("cursor_session.jsonl", session_dir, "session-aaa.jsonl")
 
-        sessions, subagents = sync._scan_jsonl_files(projects_dir, 0.0, 0.0)
+        sessions, subagents = sync._scan_jsonl_files(projects_dir, 0.0, "", 0.0, "")
         assert len(sessions) == 1
         assert len(subagents) == 0
 
@@ -449,7 +463,7 @@ class TestDiscovery:
         sub_dir = _make_subagent_dir(projects_dir, "my-workspace", "session-bbb")
         _copy_fixture("cursor_subagent.jsonl", sub_dir, "sub-001.jsonl")
 
-        sessions, subagents = sync._scan_jsonl_files(projects_dir, 0.0, 0.0)
+        sessions, subagents = sync._scan_jsonl_files(projects_dir, 0.0, "", 0.0, "")
         assert len(sessions) == 1
         assert len(subagents) == 1
 
@@ -461,8 +475,26 @@ class TestDiscovery:
         fp = _copy_fixture("cursor_session.jsonl", session_dir, "session-ccc.jsonl")
 
         future_wm = time.time() + 9999
-        sessions, _subagents = sync._scan_jsonl_files(projects_dir, future_wm, future_wm)
+        sessions, _subagents = sync._scan_jsonl_files(projects_dir, future_wm, "", future_wm, "")
         assert len(sessions) == 0
+
+    def test_watermark_same_mtime_includes_lexically_larger_path(self, tmp_path):
+        """When mtime equals the watermark, files with path > last_path are still scanned."""
+        import os
+        import sync
+
+        projects_dir = tmp_path / "projects"
+        d_a = _make_session_dir(projects_dir, "ws", "session-a")
+        d_z = _make_session_dir(projects_dir, "ws", "session-z")
+        fp_a = _copy_fixture("cursor_session.jsonl", d_a, "session-a.jsonl")
+        fp_z = _copy_fixture("cursor_session.jsonl", d_z, "session-z.jsonl")
+        mtime = 1_700_000_000.0
+        os.utime(fp_a, (mtime, mtime))
+        os.utime(fp_z, (mtime, mtime))
+        wm_p = str(fp_a.resolve())
+        sessions, _ = sync._scan_jsonl_files(projects_dir, mtime, wm_p, 0.0, "")
+        assert len(sessions) == 1
+        assert sessions[0][1] == fp_z
 
     def test_multiple_workspaces_discovered(self, tmp_path):
         import sync
@@ -472,7 +504,7 @@ class TestDiscovery:
             session_dir = _make_session_dir(projects_dir, ws, sid)
             _copy_fixture("cursor_session.jsonl", session_dir, f"{sid}.jsonl")
 
-        sessions, _ = sync._scan_jsonl_files(projects_dir, 0.0, 0.0)
+        sessions, _ = sync._scan_jsonl_files(projects_dir, 0.0, "", 0.0, "")
         assert len(sessions) == 3
 
 

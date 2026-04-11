@@ -7,9 +7,12 @@
 
 import argparse
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import duckdb
+
+from schema_util import ensure_sync_state_last_path
 
 CURSOR_DIR = Path.home() / ".cursor"
 DB_PATH = CURSOR_DIR / "cursor-warehouse.duckdb"
@@ -25,6 +28,7 @@ CHUNK_OVERLAP = 100
 
 def init_db(con: duckdb.DuckDBPyConnection):
     con.execute(SCHEMA_PATH.read_text())
+    ensure_sync_state_last_path(con)
     con.execute("INSTALL vss; LOAD vss")
     con.execute("SET hnsw_enable_experimental_persistence = true")
 
@@ -54,7 +58,14 @@ def _vectors_to_nested_lists(embeddings) -> list[list[float]]:
     Row-by-row ``[e.tolist() for e in embeddings]`` is very slow on large
     matrices (e.g. 7k×384); one call to ``.tolist()`` on the full 2D array
     (NumPy ndarray or torch tensor) is much faster. Handles 1D (single row).
+    Also accepts plain ``list[list[float]]`` (e.g. test doubles).
     """
+    if isinstance(embeddings, list):
+        if not embeddings:
+            return []
+        if isinstance(embeddings[0], (list, tuple)):
+            return [list(row) for row in embeddings]
+        return [list(embeddings)]
     if hasattr(embeddings, "detach"):
         embeddings = embeddings.detach().cpu()
     nested = embeddings.tolist()
@@ -77,6 +88,42 @@ def batch_encode(model, texts: list[str], verbose: bool = False) -> list[list[fl
     if verbose:
         print("  Converting vectors to storage format…", flush=True)
     return _vectors_to_nested_lists(embeddings)
+
+
+def _mean_pool_vectors(vectors: list[list[float]]) -> list[float]:
+    """Element-wise mean of chunk embeddings (one vector per document)."""
+    if not vectors:
+        return []
+    dim = len(vectors[0])
+    n = len(vectors)
+    return [sum(row[j] for row in vectors) / n for j in range(dim)]
+
+
+def batch_encode_documents(model, texts: list[str], verbose: bool = False) -> list[list[float]]:
+    """Encode one vector per document. Long texts are split with chunk_text then mean-pooled."""
+    if not texts:
+        return []
+    doc_chunks: list[list[str]] = []
+    for t in texts:
+        doc_chunks.append([c for _, c in chunk_text(t)])
+
+    flat: list[str] = []
+    doc_idx_per_chunk: list[int] = []
+    for di, parts in enumerate(doc_chunks):
+        for c in parts:
+            flat.append(c)
+            doc_idx_per_chunk.append(di)
+
+    flat_emb: list[list[float]] = []
+    for i in range(0, len(flat), BATCH_SIZE):
+        batch = flat[i : i + BATCH_SIZE]
+        flat_emb.extend(batch_encode(model, batch, verbose=verbose))
+
+    buckets: dict[int, list[list[float]]] = defaultdict(list)
+    for vec, di in zip(flat_emb, doc_idx_per_chunk, strict=True):
+        buckets[di].append(vec)
+
+    return [_mean_pool_vectors(buckets[i]) for i in range(len(texts))]
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +181,7 @@ def embed_messages(con: duckdb.DuckDBPyConnection, model, verbose: bool = False)
     if verbose:
         print(f"  Encoding {len(rows)} message texts (batch size {BATCH_SIZE})…", flush=True)
     texts = [r[2] for r in rows]
-    embeddings = batch_encode(model, texts, verbose=verbose)
+    embeddings = batch_encode_documents(model, texts, verbose=verbose)
 
     if verbose:
         print("  Building insert batch…", flush=True)
@@ -174,7 +221,7 @@ def embed_message_user_queries(con: duckdb.DuckDBPyConnection, model, verbose: b
     if verbose:
         print(f"  Encoding {len(rows)} user_query texts…", flush=True)
     texts = [r[2].strip() for r in rows]
-    embeddings = batch_encode(model, texts, verbose=verbose)
+    embeddings = batch_encode_documents(model, texts, verbose=verbose)
 
     batch = []
     for (_sid, uuid, _), text, emb in zip(rows, texts, embeddings):
@@ -209,7 +256,7 @@ def embed_sessions(con: duckdb.DuckDBPyConnection, model, verbose: bool = False)
     if verbose:
         print(f"  Encoding {len(rows)} session prompts…", flush=True)
     texts = [r[1] for r in rows]
-    embeddings = batch_encode(model, texts, verbose=verbose)
+    embeddings = batch_encode_documents(model, texts, verbose=verbose)
 
     batch = []
     for (sid, text), emb in zip(rows, embeddings):

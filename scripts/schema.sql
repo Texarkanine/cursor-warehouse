@@ -5,6 +5,7 @@
 CREATE TABLE IF NOT EXISTS _sync_state (
     source_name VARCHAR PRIMARY KEY,
     last_mtime DOUBLE,
+    last_path VARCHAR DEFAULT '',
     last_run TIMESTAMP DEFAULT current_timestamp,
     files_synced INTEGER DEFAULT 0,
     rows_synced BIGINT DEFAULT 0
