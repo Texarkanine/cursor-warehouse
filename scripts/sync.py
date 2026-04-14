@@ -31,6 +31,9 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 def init_db(con: duckdb.DuckDBPyConnection):
     con.execute(SCHEMA_PATH.read_text())
     ensure_sync_state_last_path(con)
+    # Required when embeddings has an HNSW index (created by embed.py); otherwise DELETE fails with
+    # "unknown index type 'HNSW'" until vss is loaded.
+    con.execute("INSTALL vss; LOAD vss")
 
 
 def get_watermark(con: duckdb.DuckDBPyConnection, source: str) -> tuple[float, str]:
