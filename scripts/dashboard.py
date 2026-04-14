@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["duckdb>=1.2"]
 # ///
-"""cursor-warehouse: HTTP dashboard server on port 3141."""
+"""cursor-warehouse: HTTP dashboard server on port 3142."""
 
 import json
 import socket
@@ -16,7 +16,7 @@ import duckdb
 
 DB_PATH = Path.home() / ".cursor" / "cursor-warehouse.duckdb"
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-PORT = 3141
+PORT = 3142
 
 
 def port_in_use(port: int) -> bool:
